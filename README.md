@@ -25,7 +25,7 @@ Binaries for Linux (`amd64`, `arm64`) are attached to every
 [release](https://github.com/entigolabs/shackle/releases).
 
 ```bash
-VERSION=v0.1.1   # the release you want
+VERSION=v0.1.2   # the release you want
 ARCH=amd64       # or arm64
 curl -fsSLO "https://github.com/entigolabs/shackle/releases/download/${VERSION}/shackle-linux-${ARCH}"
 curl -fsSLO "https://github.com/entigolabs/shackle/releases/download/${VERSION}/SHA256SUMS"
@@ -36,7 +36,7 @@ install -m 0755 "shackle-linux-${ARCH}" /usr/local/bin/shackle
 ### Container image
 
 ```bash
-docker run --rm ghcr.io/entigolabs/shackle:v0.1.1 version
+docker run --rm ghcr.io/entigolabs/shackle:v0.1.2 version
 ```
 
 The image is distroless: it holds the binary and CA certificates, no shell. To
@@ -44,7 +44,7 @@ use `shackle` together with `kubectl` or `helm`, copy the binary into your own
 image:
 
 ```dockerfile
-COPY --from=ghcr.io/entigolabs/shackle:v0.1.1 /usr/local/bin/shackle /usr/local/bin/shackle
+COPY --from=ghcr.io/entigolabs/shackle:v0.1.2 /usr/local/bin/shackle /usr/local/bin/shackle
 ```
 
 ### Verify a release
@@ -247,7 +247,7 @@ steps:
   - name: Install shackle
     run: |
       curl -fsSL -o /usr/local/bin/shackle \
-        https://github.com/entigolabs/shackle/releases/download/v0.1.1/shackle-linux-amd64
+        https://github.com/entigolabs/shackle/releases/download/v0.1.2/shackle-linux-amd64
       chmod +x /usr/local/bin/shackle
   - run: |
       shackle kubeconfig aws --cluster my-eks
