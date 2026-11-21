@@ -1,0 +1,48 @@
+name: Pull
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: pull-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      push: ${{ steps.version.outputs.push }}
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          # A prerelease of version zero: it sorts below every release, so a
+          # pull request build can never be mistaken for one.
+          echo "version=v0.0.0-pr${PR_NUMBER}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          # A pull request from a fork or from Dependabot gets a read-only
+          # token: it is built and tested, but its image is not published.
+          if [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] && [ "$AUTHOR" != "dependabot[bot]" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: version
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build.yaml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      push: ${{ needs.version.outputs.push == 'true' }}

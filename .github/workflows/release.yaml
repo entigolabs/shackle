@@ -1,0 +1,169 @@
+name: Release
+
+# Every commit on main is a release: v0.1.<run number>. The binaries, their
+# checksums and an SBOM go on the GitHub Release, the image goes to GHCR, and
+# both are signed with cosign keyless signing (the certificate names this
+# workflow; there is no key to keep).
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+# One release at a time, and never a cancelled one: a half-published release
+# is worse than a queued one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        run: echo "version=v0.1.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build.yaml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      push: true
+
+  release:
+    name: Sign and release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the tag and the GitHub Release
+      packages: write # the signature and the latest tag in GHCR
+      id-token: write # keyless cosign signing
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+      ISSUER: https://token.actions.githubusercontent.com
+      IDENTITY: ^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yaml@refs/heads/main$
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - uses: sigstore/cosign-installer@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # The image is signed by digest, and only then does `latest` move to
+      # it, so `latest` never names an unsigned image.
+      - name: Sign the image
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign verify --certificate-oidc-issuer "$ISSUER" --certificate-identity-regexp "$IDENTITY" "${IMAGE}@${DIGEST}" > /dev/null
+          docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}@${DIGEST}"
+
+      # IMAGES lists the digest of the multi-arch index and of each
+      # platform's image, in the format of sha256sum.
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check SHA256SUMS
+          sha256sum shackle.cdx.json >> SHA256SUMS
+          {
+            echo "${DIGEST#sha256:}  ${IMAGE}:${VERSION}"
+            docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}" \
+              | jq -r --arg image "${IMAGE}:${VERSION}" '.manifests[]
+                  | select(.platform.os != "unknown")
+                  | "\(.digest | sub("^sha256:"; ""))  \($image) (\(.platform.os)/\(.platform.architecture))"'
+          } > IMAGES
+          sha256sum IMAGES >> SHA256SUMS
+          cat SHA256SUMS IMAGES
+
+      - name: Sign the checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-oidc-issuer "$ISSUER" --certificate-identity-regexp "$IDENTITY" SHA256SUMS
+
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          {
+            echo "## Binaries"
+            echo
+            echo '```'
+            grep ' shackle-linux-' dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "\`SHA256SUMS\` covers the binaries, the SBOM (\`shackle.cdx.json\`) and \`IMAGES\`. It is signed with cosign:"
+            echo
+            echo '```bash'
+            echo "cosign verify-blob --bundle SHA256SUMS.sigstore.json \\"
+            echo "  --certificate-oidc-issuer $ISSUER \\"
+            echo "  --certificate-identity-regexp '$IDENTITY' \\"
+            echo "  SHA256SUMS"
+            echo "sha256sum --check --ignore-missing SHA256SUMS"
+            echo '```'
+            echo
+            echo "## Container image"
+            echo
+            echo "One multi-arch image (linux/amd64, linux/arm64), signed with cosign:"
+            echo
+            echo "| Image | Tags | Digest |"
+            echo "| --- | --- | --- |"
+            echo "| \`${IMAGE}\` | \`${VERSION}\`, \`latest\` | \`${DIGEST}\` |"
+            echo
+            echo '```'
+            cat dist/IMAGES
+            echo '```'
+            echo
+            echo '```bash'
+            echo "cosign verify --certificate-oidc-issuer $ISSUER \\"
+            echo "  --certificate-identity-regexp '$IDENTITY' \\"
+            echo "  ${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+          } > notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The release is created last: a version that has a GitHub Release is a
+      # version whose image and signatures are all in place. A re-run of a
+      # failed run publishes the same version again.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" > /dev/null 2>&1; then
+            gh release upload "$VERSION" --clobber dist/*
+          else
+            gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" \
+              --generate-notes --notes-file notes.md --latest dist/*
+          fi
