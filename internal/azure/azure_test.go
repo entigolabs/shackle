@@ -195,3 +195,58 @@ func TestRegistryCredential(t *testing.T) {
 		t.Error("no registry was accepted")
 	}
 }
+
+func TestRegistryLookup(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch {
+		case r.URL.Path == "/oauth2/exchange":
+			_, _ = io.WriteString(w, `{"refresh_token":"refresh"}`)
+		case strings.Contains(r.URL.Path, "/resourceGroups/one/"):
+			_, _ = io.WriteString(w, `{"value":[{"name":"MyReg","properties":{"loginServer":"`+r.Host+`.azurecr.io"}}]}`)
+		case strings.Contains(r.URL.Path, "/resourceGroups/two/"):
+			_, _ = io.WriteString(w, `{"value":[{"name":"a","properties":{"loginServer":"a.azurecr.io"}},{"name":"b","properties":{"loginServer":"b.azurecr.io"}}]}`)
+		case strings.Contains(r.URL.Path, "/resourceGroups/none/"):
+			_, _ = io.WriteString(w, `{"value":[]}`)
+		default: // the whole subscription
+			_, _ = io.WriteString(w, `{"value":[{"name":"other","properties":{"loginServer":"other.azurecr.io"}},{"name":"MyReg","properties":{"loginServer":"myreg-abc.azurecr.io"}}]}`)
+		}
+	}))
+	defer srv.Close()
+	p := Provider{ARM: srv.URL, HTTP: srv.Client(), Credential: &fakeCredential{}}
+	ctx := context.Background()
+
+	// A bare name is found in the subscription, whatever its case, and the
+	// login server is what the API says, not a guess from the name.
+	got, err := p.loginServer(ctx, "t", cloud.Options{Registry: "myreg", Subscription: "sub"})
+	if err != nil || got != "myreg-abc.azurecr.io" {
+		t.Errorf("by name: %q %v", got, err)
+	}
+	if last := paths[len(paths)-1]; last != "/subscriptions/sub/providers/Microsoft.ContainerRegistry/registries" {
+		t.Errorf("looked up at %s", last)
+	}
+	// No registry: the one in the resource group.
+	got, err = p.loginServer(ctx, "t", cloud.Options{Subscription: "sub", ResourceGroup: "one"})
+	if err != nil || !strings.HasSuffix(got, ".azurecr.io") {
+		t.Errorf("the one in the group: %q %v", got, err)
+	}
+	if _, err := p.loginServer(ctx, "t", cloud.Options{Subscription: "sub", ResourceGroup: "two"}); err == nil || !strings.Contains(err.Error(), "a.azurecr.io, b.azurecr.io") {
+		t.Errorf("several registries: %v", err)
+	}
+	if _, err := p.loginServer(ctx, "t", cloud.Options{Subscription: "sub", ResourceGroup: "none"}); err == nil {
+		t.Error("an empty resource group gave a registry")
+	}
+	if _, err := p.loginServer(ctx, "t", cloud.Options{Registry: "absent", Subscription: "sub"}); err == nil {
+		t.Error("an unknown registry name was found")
+	}
+	// A host name needs no lookup and no subscription.
+	t.Setenv("AZURE_SUBSCRIPTION_ID", "")
+	t.Setenv("AZURE_RESOURCE_GROUP", "")
+	if got, err := p.loginServer(ctx, "t", cloud.Options{Registry: "x.azurecr.io"}); err != nil || got != "x.azurecr.io" {
+		t.Errorf("host name: %q %v", got, err)
+	}
+	if _, err := p.loginServer(ctx, "t", cloud.Options{}); err == nil {
+		t.Error("no registry, no subscription and no group was accepted")
+	}
+}

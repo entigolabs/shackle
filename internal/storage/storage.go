@@ -12,12 +12,15 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Object is one stored object.
 type Object struct {
 	Key  string
 	Size int64
+	// ModTime is when the object was last written; zero when unknown.
+	ModTime time.Time
 }
 
 // Store is one bucket.
@@ -28,6 +31,8 @@ type Store interface {
 	Download(ctx context.Context, key string, w io.Writer) error
 	// Upload stores size bytes from r under key.
 	Upload(ctx context.Context, key string, r io.ReadSeeker, size int64) error
+	// Delete removes the object.
+	Delete(ctx context.Context, key string) error
 }
 
 // Location is a parsed object storage URL.
@@ -158,6 +163,11 @@ func download(ctx context.Context, store Store, key string, o CopyOptions, exclu
 		if err := downloadFile(ctx, store, obj.Key, local); err != nil {
 			return err
 		}
+		// The file gets the object's time, so that a later sync can tell
+		// what changed since the download.
+		if !obj.ModTime.IsZero() {
+			_ = os.Chtimes(local, obj.ModTime, obj.ModTime)
+		}
 	}
 	return nil
 }
@@ -206,24 +216,140 @@ func upload(ctx context.Context, store Store, key string, o CopyOptions, exclude
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	return filepath.WalkDir(o.Source, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(o.Source, p)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
+	return walkFiles(o.Source, func(p, rel string, _ os.FileInfo) error {
 		if exclude.match(rel) {
 			return nil
 		}
 		o.Log("%s -> %s", p, prefix+rel)
 		return uploadFile(ctx, store, p, prefix+rel)
 	})
+}
+
+// walkFiles calls fn for every file under root, with its path relative to
+// root in slashes. Symbolic links are followed, as the cloud CLIs do: a
+// provider cache is a directory of links.
+func walkFiles(root string, fn func(path, rel string, info os.FileInfo) error) error {
+	return walkDir(root, "", 0, fn)
+}
+
+// maxDepth stops a loop of symbolic links.
+const maxDepth = 64
+
+func walkDir(dir, rel string, depth int, fn func(path, rel string, info os.FileInfo) error) error {
+	if depth > maxDepth {
+		return fmt.Errorf("%s: directories nested deeper than %d, a loop of symbolic links?", dir, maxDepth)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		r := e.Name()
+		if rel != "" {
+			r = rel + "/" + e.Name()
+		}
+		info, err := os.Stat(p) // follows a link
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // a dangling link
+			}
+			return err
+		}
+		switch {
+		case info.IsDir():
+			if err := walkDir(p, r, depth+1, fn); err != nil {
+				return err
+			}
+		case info.Mode().IsRegular():
+			if err := fn(p, r, info); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// SyncOptions is one sync.
+type SyncOptions struct {
+	// Source is a local directory, Destination an object storage prefix.
+	Source      string
+	Destination string
+	// Delete removes objects under the prefix that the directory lacks.
+	Delete bool
+	// Exclude are patterns of relative paths that are neither uploaded nor
+	// deleted.
+	Exclude []string
+	Log     func(format string, args ...any)
+}
+
+// Sync makes an object storage prefix hold what a local directory holds. A
+// file is uploaded when the prefix lacks it, when the sizes differ, or when
+// the file is newer than the object; everything else is left alone.
+func Sync(ctx context.Context, o SyncOptions, open func(context.Context, Location) (Store, error)) error {
+	if _, remote, _ := Parse(o.Source); remote {
+		return errors.New("sync goes from a local directory to object storage; use cp --recursive to download")
+	}
+	dst, remote, err := Parse(o.Destination)
+	if err != nil {
+		return err
+	}
+	if !remote {
+		return errors.New("the destination of sync must be an object storage location (s3://, gs://, az:// or oci://)")
+	}
+	if info, err := os.Stat(o.Source); err != nil {
+		return err
+	} else if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", o.Source)
+	}
+	if o.Log == nil {
+		o.Log = func(string, ...any) {}
+	}
+	exclude, err := compileExcludes(o.Exclude)
+	if err != nil {
+		return err
+	}
+	store, err := open(ctx, dst)
+	if err != nil {
+		return err
+	}
+	prefix := dst.Key
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	objects, err := store.List(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	remoteObjects := make(map[string]Object, len(objects))
+	for _, obj := range objects {
+		remoteObjects[strings.TrimPrefix(obj.Key, prefix)] = obj
+	}
+	seen := map[string]bool{}
+	err = walkFiles(o.Source, func(p, rel string, info os.FileInfo) error {
+		if exclude.match(rel) {
+			return nil
+		}
+		seen[rel] = true
+		if obj, ok := remoteObjects[rel]; ok && obj.Size == info.Size() && !obj.ModTime.IsZero() && !info.ModTime().After(obj.ModTime) {
+			return nil
+		}
+		o.Log("%s -> %s", p, prefix+rel)
+		return uploadFile(ctx, store, p, prefix+rel)
+	})
+	if err != nil || !o.Delete {
+		return err
+	}
+	for rel, obj := range remoteObjects {
+		if rel == "" || seen[rel] || exclude.match(rel) {
+			continue
+		}
+		o.Log("delete %s", obj.Key)
+		if err := store.Delete(ctx, obj.Key); err != nil {
+			return fmt.Errorf("delete %s: %w", obj.Key, err)
+		}
+	}
+	return nil
 }
 
 func uploadFile(ctx context.Context, store Store, file, key string) error {

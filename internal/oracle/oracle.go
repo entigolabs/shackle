@@ -215,7 +215,7 @@ func (s *store) List(ctx context.Context, prefix string) ([]storage.Object, erro
 			BucketName:    &s.bucket,
 			Prefix:        &prefix,
 			Start:         start,
-			Fields:        common.String("name,size"),
+			Fields:        common.String("name,size,timeModified"),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("list oci://%s@%s/%s: %w", s.bucket, s.namespace, prefix, err)
@@ -228,7 +228,11 @@ func (s *store) List(ctx context.Context, prefix string) ([]storage.Object, erro
 			if o.Size != nil {
 				size = *o.Size
 			}
-			out = append(out, storage.Object{Key: *o.Name, Size: size})
+			var modified time.Time
+			if o.TimeModified != nil {
+				modified = o.TimeModified.Time
+			}
+			out = append(out, storage.Object{Key: *o.Name, Size: size, ModTime: modified})
 		}
 		if resp.NextStartWith == nil {
 			return out, nil
@@ -255,5 +259,10 @@ func (s *store) Upload(ctx context.Context, key string, r io.ReadSeeker, size in
 		ContentLength: &size,
 		PutObjectBody: io.NopCloser(r),
 	})
+	return err
+}
+
+func (s *store) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, objectstorage.DeleteObjectRequest{NamespaceName: &s.namespace, BucketName: &s.bucket, ObjectName: &key})
 	return err
 }

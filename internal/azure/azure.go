@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
@@ -33,6 +34,8 @@ const (
 	// The user name a registry expects with a refresh token.
 	acrUsername = "00000000-0000-0000-0000-000000000000"
 	apiVersion  = "2024-09-01"
+	// API version of Microsoft.ContainerRegistry.
+	registryAPIVersion = "2023-07-01"
 )
 
 // Provider implements cloud.Provider with DefaultAzureCredential: a service
@@ -180,12 +183,12 @@ func (p Provider) Token(ctx context.Context, o cloud.Options) (*cloud.Token, err
 // RegistryCredential exchanges the identity's Entra token for a refresh
 // token of the registry, which is what `az acr login --expose-token` prints.
 func (p Provider) RegistryCredential(ctx context.Context, o cloud.Options) (*cloud.RegistryCredential, error) {
-	if o.Registry == "" {
-		return nil, errors.New("no registry: pass --registry <name>.azurecr.io")
-	}
 	t, err := p.token(ctx, armScope)
 	if err != nil {
 		return nil, fmt.Errorf("get a token for Azure Resource Manager: %w", err)
+	}
+	if o.Registry, err = p.loginServer(ctx, t.Token, o); err != nil {
+		return nil, err
 	}
 	form := url.Values{"grant_type": {"access_token"}, "service": {o.Registry}, "access_token": {t.Token}}
 	if tenant := os.Getenv("AZURE_TENANT_ID"); tenant != "" {
@@ -207,6 +210,68 @@ func (p Provider) RegistryCredential(ctx context.Context, o cloud.Options) (*clo
 		return nil, fmt.Errorf("%s returned no refresh token", o.Registry)
 	}
 	return &cloud.RegistryCredential{Registry: o.Registry, Username: acrUsername, Password: res.RefreshToken}, nil
+}
+
+// loginServer is the host of the registry to log in to. A host name is taken
+// as it is. A bare registry name is looked up in the subscription, and with
+// no registry at all the resource group must hold exactly one.
+func (p Provider) loginServer(ctx context.Context, armToken string, o cloud.Options) (string, error) {
+	if strings.Contains(o.Registry, ".") || strings.Contains(o.Registry, "://") {
+		return o.Registry, nil
+	}
+	sub := firstNonEmpty(o.Subscription, os.Getenv("AZURE_SUBSCRIPTION_ID"))
+	group := firstNonEmpty(o.ResourceGroup, os.Getenv("AZURE_RESOURCE_GROUP"))
+	if sub == "" {
+		return "", errors.New("no subscription: pass --subscription or set AZURE_SUBSCRIPTION_ID, or pass --registry <name>.azurecr.io")
+	}
+	scope := "/subscriptions/" + url.PathEscape(sub)
+	if o.Registry == "" {
+		if group == "" {
+			return "", errors.New("no registry: pass --registry, or --resource-group to use the one registry in it")
+		}
+		scope += "/resourceGroups/" + url.PathEscape(group)
+	}
+	next := p.arm() + scope + "/providers/Microsoft.ContainerRegistry/registries?api-version=" + registryAPIVersion
+	var servers []string
+	for next != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+armToken)
+		body, err := do(p.http(), req)
+		if err != nil {
+			return "", fmt.Errorf("list the container registries: %w", err)
+		}
+		var page struct {
+			Value []struct {
+				Name       string `json:"name"`
+				Properties struct {
+					LoginServer string `json:"loginServer"`
+				} `json:"properties"`
+			} `json:"value"`
+			NextLink string `json:"nextLink"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return "", fmt.Errorf("container registries answer: %w", err)
+		}
+		for _, r := range page.Value {
+			if o.Registry == "" || strings.EqualFold(r.Name, o.Registry) {
+				servers = append(servers, r.Properties.LoginServer)
+			}
+		}
+		next = page.NextLink
+	}
+	switch {
+	case len(servers) == 1:
+		return servers[0], nil
+	case o.Registry != "":
+		return "", fmt.Errorf("no container registry named %s in the subscription", o.Registry)
+	case len(servers) == 0:
+		return "", fmt.Errorf("no container registry in resource group %s", group)
+	default:
+		return "", fmt.Errorf("several container registries in resource group %s, pass --registry: %s", group, strings.Join(servers, ", "))
+	}
 }
 
 // registryURL is the registry's base URL; a test server's URL is kept as is.
@@ -276,7 +341,11 @@ func (s *store) List(ctx context.Context, prefix string) ([]storage.Object, erro
 			if b.Properties != nil && b.Properties.ContentLength != nil {
 				size = *b.Properties.ContentLength
 			}
-			out = append(out, storage.Object{Key: *b.Name, Size: size})
+			var modified time.Time
+			if b.Properties != nil && b.Properties.LastModified != nil {
+				modified = *b.Properties.LastModified
+			}
+			out = append(out, storage.Object{Key: *b.Name, Size: size, ModTime: modified})
 		}
 	}
 	return out, nil
@@ -294,5 +363,10 @@ func (s *store) Download(ctx context.Context, key string, w io.Writer) error {
 
 func (s *store) Upload(ctx context.Context, key string, r io.ReadSeeker, _ int64) error {
 	_, err := s.client.UploadStream(ctx, s.container, key, r, nil)
+	return err
+}
+
+func (s *store) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteBlob(ctx, s.container, key, nil)
 	return err
 }

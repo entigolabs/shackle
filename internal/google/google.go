@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"golang.org/x/oauth2"
 	googleauth "golang.org/x/oauth2/google"
@@ -162,9 +163,11 @@ type store struct {
 
 func (s *store) List(ctx context.Context, prefix string) ([]storage.Object, error) {
 	var out []storage.Object
-	err := s.svc.Objects.List(s.bucket).Prefix(prefix).Fields("nextPageToken", "items(name,size)").Pages(ctx, func(page *gcs.Objects) error {
+	err := s.svc.Objects.List(s.bucket).Prefix(prefix).Fields("nextPageToken", "items(name,size,updated)").Pages(ctx, func(page *gcs.Objects) error {
 		for _, o := range page.Items {
-			out = append(out, storage.Object{Key: o.Name, Size: int64(o.Size)})
+			// A time that does not parse is the zero time: unknown.
+			updated, _ := time.Parse(time.RFC3339, o.Updated)
+			out = append(out, storage.Object{Key: o.Name, Size: int64(o.Size), ModTime: updated})
 		}
 		return nil
 	})
@@ -187,4 +190,8 @@ func (s *store) Download(ctx context.Context, key string, w io.Writer) error {
 func (s *store) Upload(ctx context.Context, key string, r io.ReadSeeker, _ int64) error {
 	_, err := s.svc.Objects.Insert(s.bucket, &gcs.Object{Name: key}).Media(r).Context(ctx).Do()
 	return err
+}
+
+func (s *store) Delete(ctx context.Context, key string) error {
+	return s.svc.Objects.Delete(s.bucket, key).Context(ctx).Do()
 }

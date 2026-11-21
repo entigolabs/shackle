@@ -32,6 +32,7 @@ Usage:
   shackle token <cloud> [flags]                       print a cluster token (kubectl credential plugin)
   shackle registry-token <cloud> [flags]              print a container registry password
   shackle cp [--recursive] SOURCE DESTINATION         copy to or from object storage
+  shackle sync [--delete] DIRECTORY DESTINATION       make an object storage prefix match a directory
   shackle version
 
 Clouds: aws, google, azure, oracle.
@@ -104,6 +105,8 @@ func (e *env) run(ctx context.Context, args []string) int {
 		err = e.registryToken(ctx, rest)
 	case "cp":
 		err = e.cp(ctx, rest)
+	case "sync":
+		err = e.sync(ctx, rest)
 	case "version", "--version":
 		fmt.Fprintln(e.stdout, e.version)
 	case "help", "-h", "--help":
@@ -332,7 +335,9 @@ func (e *env) registryToken(ctx context.Context, args []string) error {
 	fs := e.newFlags("registry-token", "registry-token <cloud> [flags]")
 	var o cloud.Options
 	fs.StringVar(&o.Region, "region", "", "region of the registry (aws, google); default from AWS_REGION, GOOGLE_REGION")
-	fs.StringVar(&o.Registry, "registry", "", "registry host (azure: <name>.azurecr.io, required; google: default <region>-docker.pkg.dev)")
+	fs.StringVar(&o.Registry, "registry", "", "registry host (google: default <region>-docker.pkg.dev; azure: <name>.azurecr.io or a registry name)")
+	fs.StringVar(&o.Subscription, "subscription", "", "azure: subscription ID, to look a registry up; default from AZURE_SUBSCRIPTION_ID")
+	fs.StringVar(&o.ResourceGroup, "resource-group", "", "azure: without --registry, the resource group that holds the one registry; default from AZURE_RESOURCE_GROUP")
 	output := fs.String("output", "password", "what to print: password, or json with registry, username, password and expiresAt")
 	positional, err := parse(fs, args)
 	if err != nil {
@@ -386,6 +391,29 @@ func (e *env) cp(ctx context.Context, args []string) error {
 		o.Log = func(format string, a ...any) { fmt.Fprintf(e.stderr, format+"\n", a...) }
 	}
 	return storage.Copy(ctx, o, func(ctx context.Context, loc storage.Location) (storage.Store, error) {
+		return e.open(ctx, loc, *pathStyle)
+	})
+}
+
+func (e *env) sync(ctx context.Context, args []string) error {
+	fs := e.newFlags("sync", "sync [flags] DIRECTORY DESTINATION")
+	del := fs.Bool("delete", false, "delete objects under the destination that the directory does not have")
+	var exclude multiFlag
+	fs.Var(&exclude, "exclude", "neither upload nor delete relative paths matching this pattern (* matches any characters, including /); may be repeated")
+	pathStyle := fs.Bool("s3-path-style", false, "s3: address the bucket in the path, for S3-compatible stores (endpoint from AWS_ENDPOINT_URL_S3)")
+	quiet := fs.Bool("quiet", false, "do not print the files uploaded and deleted")
+	positional, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 2 {
+		return usagef("expected DIRECTORY and DESTINATION, got %d arguments", len(positional))
+	}
+	o := storage.SyncOptions{Source: positional[0], Destination: positional[1], Delete: *del, Exclude: exclude}
+	if !*quiet {
+		o.Log = func(format string, a ...any) { fmt.Fprintf(e.stderr, format+"\n", a...) }
+	}
+	return storage.Sync(ctx, o, func(ctx context.Context, loc storage.Location) (storage.Store, error) {
 		return e.open(ctx, loc, *pathStyle)
 	})
 }

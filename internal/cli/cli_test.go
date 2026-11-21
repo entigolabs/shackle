@@ -248,3 +248,22 @@ func TestParseInterspersed(t *testing.T) {
 		t.Errorf("positional %v a=%q b=%v", positional, *a, *b)
 	}
 }
+
+func TestSyncPassesOptions(t *testing.T) {
+	e, _, errOut := newEnv(t, &fakeProvider{})
+	var gotLoc storage.Location
+	e.open = func(_ context.Context, loc storage.Location, _ bool) (storage.Store, error) {
+		gotLoc = loc
+		return nil, errors.New("stop here")
+	}
+	code := e.run(context.Background(), []string{"sync", t.TempDir(), "az://acct/tfstate/steps/x/.terraform", "--delete"})
+	if code != 1 || !strings.Contains(errOut.String(), "stop here") {
+		t.Errorf("exit %d: %s", code, errOut)
+	}
+	if gotLoc.Account != "acct" || gotLoc.Bucket != "tfstate" || gotLoc.Key != "steps/x/.terraform" {
+		t.Errorf("store opened with %+v", gotLoc)
+	}
+	if code := e.run(context.Background(), []string{"sync", "only-one"}); code != 2 {
+		t.Errorf("one argument: exit %d, want 2", code)
+	}
+}

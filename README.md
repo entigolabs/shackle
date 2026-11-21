@@ -15,7 +15,7 @@ about 35 MB.
 | `shackle kubeconfig` | EKS | GKE | AKS | OKE |
 | `shackle token` | EKS | GKE | AKS | OKE |
 | `shackle registry-token` | ECR | Artifact Registry | ACR | not available |
-| `shackle cp` | `s3://` | `gs://` | `az://` | `oci://` |
+| `shackle cp`, `shackle sync` | `s3://` | `gs://` | `az://` | `oci://` |
 
 ## Install
 
@@ -25,7 +25,7 @@ Binaries for Linux (`amd64`, `arm64`) are attached to every
 [release](https://github.com/entigolabs/shackle/releases).
 
 ```bash
-VERSION=v0.1.2   # the release you want
+VERSION=v0.1.3   # the release you want
 ARCH=amd64       # or arm64
 curl -fsSLO "https://github.com/entigolabs/shackle/releases/download/${VERSION}/shackle-linux-${ARCH}"
 curl -fsSLO "https://github.com/entigolabs/shackle/releases/download/${VERSION}/SHA256SUMS"
@@ -36,7 +36,7 @@ install -m 0755 "shackle-linux-${ARCH}" /usr/local/bin/shackle
 ### Container image
 
 ```bash
-docker run --rm ghcr.io/entigolabs/shackle:v0.1.2 version
+docker run --rm ghcr.io/entigolabs/shackle:v0.1.3 version
 ```
 
 The image is distroless: it holds the binary and CA certificates, no shell. To
@@ -44,7 +44,7 @@ use `shackle` together with `kubectl` or `helm`, copy the binary into your own
 image:
 
 ```dockerfile
-COPY --from=ghcr.io/entigolabs/shackle:v0.1.2 /usr/local/bin/shackle /usr/local/bin/shackle
+COPY --from=ghcr.io/entigolabs/shackle:v0.1.3 /usr/local/bin/shackle /usr/local/bin/shackle
 ```
 
 ### Verify a release
@@ -173,6 +173,10 @@ shackle registry-token azure --registry myregistry.azurecr.io \
   | docker login myregistry.azurecr.io --username 00000000-0000-0000-0000-000000000000 --password-stdin
 ```
 
+On Azure `--registry` may also be a bare registry name, which is looked up in
+the subscription; without it, `--resource-group` selects the one registry in
+that group. `--output json` then tells which host that is.
+
 `--output json` prints the registry, the user name, the password and, where the
 cloud tells it, the expiry:
 
@@ -217,16 +221,32 @@ shackle cp oci://my-bucket@my-namespace/config.yaml .
 
 A prefix is a directory: `s3://bucket/steps/a` does not match
 `steps/ab/file`. A key that would land outside the destination directory
-(`../`) is refused. There is no sync or delete, and no copy from one bucket to
-another.
+(`../`) is refused. Symbolic links are followed on upload. A recursive
+download gives each file the modification time of its object. There is no
+copy from one bucket to another.
+
+### `shackle sync`
+
+Makes an object storage prefix hold what a local directory holds.
+
+```bash
+shackle sync .terraform s3://my-bucket/steps/net/.terraform --delete
+```
+
+A file is uploaded when the prefix lacks it, when the sizes differ, or when the
+file is newer than the object; with the modification times `cp --recursive`
+sets, a directory that was downloaded and not touched uploads nothing.
+`--delete` removes the objects the directory does not have. `--exclude`
+patterns are neither uploaded nor deleted. Sync goes one way, from the
+directory to the bucket; `cp --recursive` is the other direction.
 
 ## Permissions
 
 What the identity needs for each command:
 
-| Cloud | `kubeconfig` | `token` | `registry-token` | `cp` |
+| Cloud | `kubeconfig` | `token` | `registry-token` | `cp`, `sync` |
 | --- | --- | --- | --- | --- |
-| AWS | `eks:DescribeCluster` | none in IAM; the identity must be mapped in the cluster (access entry or `aws-auth`) | `ecr:GetAuthorizationToken` | `s3:ListBucket`, `s3:GetObject`, `s3:PutObject` |
+| AWS | `eks:DescribeCluster` | none in IAM; the identity must be mapped in the cluster (access entry or `aws-auth`) | `ecr:GetAuthorizationToken` | `s3:ListBucket`, `s3:GetObject`, `s3:PutObject`; `s3:DeleteObject` for `sync --delete` |
 | Google Cloud | `container.clusters.get` | access to the cluster through IAM or RBAC | Artifact Registry reader or writer | `storage.objects.list`, `get`, `create` |
 | Azure | `Microsoft.ContainerService/managedClusters/listClusterUserCredential/action` | access to the cluster through Azure RBAC or Kubernetes RBAC | `AcrPull` or `AcrPush` | Storage Blob Data Reader or Contributor |
 | Oracle Cloud | `use clusters` in the compartment | access to the cluster | – | `read objects` or `manage objects` on the bucket |
@@ -247,7 +267,7 @@ steps:
   - name: Install shackle
     run: |
       curl -fsSL -o /usr/local/bin/shackle \
-        https://github.com/entigolabs/shackle/releases/download/v0.1.2/shackle-linux-amd64
+        https://github.com/entigolabs/shackle/releases/download/v0.1.3/shackle-linux-amd64
       chmod +x /usr/local/bin/shackle
   - run: |
       shackle kubeconfig aws --cluster my-eks
@@ -268,7 +288,7 @@ deploy:
 
 - Azure: the public cloud only, not the sovereign clouds.
 - Oracle Cloud: no registry credentials.
-- `cp` copies; it does not sync or delete.
+- `sync` uploads only; there is no sync from a bucket to a directory.
 - Binaries are built for Linux. `go build` works on other platforms.
 
 ## Development

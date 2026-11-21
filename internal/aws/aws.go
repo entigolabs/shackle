@@ -175,7 +175,7 @@ func (s *store) List(ctx context.Context, prefix string) ([]storage.Object, erro
 			return nil, fmt.Errorf("list s3://%s/%s: %w", s.bucket, prefix, err)
 		}
 		for _, o := range page.Contents {
-			out = append(out, storage.Object{Key: awssdk.ToString(o.Key), Size: awssdk.ToInt64(o.Size)})
+			out = append(out, storage.Object{Key: awssdk.ToString(o.Key), Size: awssdk.ToInt64(o.Size), ModTime: awssdk.ToTime(o.LastModified)})
 		}
 	}
 	return out, nil
@@ -193,5 +193,10 @@ func (s *store) Download(ctx context.Context, key string, w io.Writer) error {
 
 func (s *store) Upload(ctx context.Context, key string, r io.ReadSeeker, size int64) error {
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{Bucket: &s.bucket, Key: &key, Body: r, ContentLength: &size})
+	return err
+}
+
+func (s *store) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.bucket, Key: &key})
 	return err
 }

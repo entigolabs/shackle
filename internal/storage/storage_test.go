@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParse(t *testing.T) {
@@ -45,15 +46,24 @@ func TestParse(t *testing.T) {
 
 // fake is a bucket in memory.
 type fake struct {
-	objects map[string]string
-	failOn  string
+	objects  map[string]string
+	modTimes map[string]time.Time
+	failOn   string
+	uploads  []string
+	deletes  []string
+}
+
+func (f *fake) Delete(_ context.Context, key string) error {
+	delete(f.objects, key)
+	f.deletes = append(f.deletes, key)
+	return nil
 }
 
 func (f *fake) List(_ context.Context, prefix string) ([]Object, error) {
 	var out []Object
 	for k, v := range f.objects {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, Object{Key: k, Size: int64(len(v))})
+			out = append(out, Object{Key: k, Size: int64(len(v)), ModTime: f.modTimes[k]})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
@@ -83,6 +93,7 @@ func (f *fake) Upload(_ context.Context, key string, r io.ReadSeeker, size int64
 		return errors.New("size does not match the content")
 	}
 	f.objects[key] = b.String()
+	f.uploads = append(f.uploads, key)
 	return nil
 }
 
@@ -252,5 +263,117 @@ func TestExcludes(t *testing.T) {
 		if got := e.match(path); got != want {
 			t.Errorf("match(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+func write(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestDownloadSetsModTime(t *testing.T) {
+	when := time.Date(2020, 5, 6, 7, 8, 9, 0, time.UTC)
+	f := &fake{objects: map[string]string{"p/a": "a"}, modTimes: map[string]time.Time{"p/a": when}}
+	dir := t.TempDir()
+	if err := Copy(context.Background(), CopyOptions{Source: "s3://b/p", Destination: dir, Recursive: true}, opener(f)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(when) {
+		t.Errorf("file time = %v, want the object's %v", info.ModTime(), when)
+	}
+}
+
+func TestSync(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, map[string]string{"same": "same", "changed": "new content", "newer": "abcd", "added/file": "x", "skip.log": "local"})
+	old := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+	f := &fake{
+		objects: map[string]string{
+			"cache/same":     "same",
+			"cache/changed":  "old",
+			"cache/newer":    "wxyz", // same size, but the file was written after the object
+			"cache/gone":     "x",
+			"cache/keep.log": "remote",
+			"cachex/other":   "not under the prefix",
+		},
+		modTimes: map[string]time.Time{"cache/same": future, "cache/changed": future, "cache/newer": old},
+	}
+	err := Sync(context.Background(), SyncOptions{Source: dir, Destination: "s3://b/cache", Delete: true, Exclude: []string{"*.log"}}, opener(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(f.uploads)
+	if got := strings.Join(f.uploads, ","); got != "cache/added/file,cache/changed,cache/newer" {
+		t.Errorf("uploaded %s", got)
+	}
+	if got := strings.Join(f.deletes, ","); got != "cache/gone" {
+		t.Errorf("deleted %s, want only cache/gone", got)
+	}
+	want := map[string]string{
+		"cache/same": "same", "cache/changed": "new content", "cache/newer": "abcd", "cache/added/file": "x",
+		"cache/keep.log": "remote", "cachex/other": "not under the prefix",
+	}
+	if !equal(f.objects, want) {
+		t.Errorf("bucket = %v, want %v", f.objects, want)
+	}
+}
+
+func TestSyncWithoutDelete(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, map[string]string{"a": "a"})
+	f := &fake{objects: map[string]string{"p/extra": "x"}}
+	if err := Sync(context.Background(), SyncOptions{Source: dir, Destination: "gs://b/p/"}, opener(f)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.deletes) != 0 || f.objects["p/extra"] != "x" || f.objects["p/a"] != "a" {
+		t.Errorf("bucket = %v, deletes = %v", f.objects, f.deletes)
+	}
+}
+
+func TestSyncRejects(t *testing.T) {
+	f := &fake{objects: map[string]string{}}
+	dir := t.TempDir()
+	if err := Sync(context.Background(), SyncOptions{Source: "s3://b/p", Destination: dir}, opener(f)); err == nil {
+		t.Error("a download sync was accepted")
+	}
+	if err := Sync(context.Background(), SyncOptions{Source: dir, Destination: dir}, opener(f)); err == nil {
+		t.Error("a local destination was accepted")
+	}
+	file := filepath.Join(dir, "f")
+	write(t, dir, map[string]string{"f": "x"})
+	if err := Sync(context.Background(), SyncOptions{Source: file, Destination: "s3://b/p"}, opener(f)); err == nil {
+		t.Error("a file as the source was accepted")
+	}
+}
+
+func TestUploadFollowsSymlinks(t *testing.T) {
+	real := t.TempDir()
+	write(t, real, map[string]string{"provider/bin": "binary"})
+	dir := t.TempDir()
+	write(t, dir, map[string]string{"plain": "p"})
+	if err := os.Symlink(filepath.Join(real, "provider"), filepath.Join(dir, "linked")); err != nil {
+		t.Skip("no symbolic links here")
+	}
+	_ = os.Symlink(filepath.Join(real, "missing"), filepath.Join(dir, "dangling"))
+	f := &fake{objects: map[string]string{}}
+	if err := Sync(context.Background(), SyncOptions{Source: dir, Destination: "s3://b/c"}, opener(f)); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"c/plain": "p", "c/linked/bin": "binary"}
+	if !equal(f.objects, want) {
+		t.Errorf("bucket = %v, want %v", f.objects, want)
 	}
 }
