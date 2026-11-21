@@ -1,6 +1,7 @@
 package google
 
 import (
+	"context"
 	"encoding/base64"
 	"testing"
 
@@ -60,5 +61,23 @@ func TestFromAPI(t *testing.T) {
 	}
 	if _, err := fromAPI(&container.Cluster{Status: "PROVISIONING"}, "proj", "region", cloud.Options{Cluster: "c"}); err == nil {
 		t.Error("a cluster without an endpoint was accepted")
+	}
+}
+
+func TestRegistries(t *testing.T) {
+	t.Setenv("GOOGLE_REGION", "")
+	t.Setenv("GOOGLE_ZONE", "europe-north1-a")
+	p := Provider{}
+	got, err := p.Registries(context.Background(), cloud.Options{Region: "europe-north1"})
+	if err != nil || len(got) != 1 || got[0] != "europe-north1-docker.pkg.dev" {
+		t.Errorf("Registries = %v %v", got, err)
+	}
+	got, _ = p.Registries(context.Background(), cloud.Options{Registry: "custom.example", Region: "x"})
+	if len(got) != 1 || got[0] != "custom.example" {
+		t.Errorf("Registries = %v, want the registry that was given", got)
+	}
+	// A zone is not a registry location.
+	if _, err := p.Registries(context.Background(), cloud.Options{}); err == nil {
+		t.Error("a registry was made up without a region")
 	}
 }

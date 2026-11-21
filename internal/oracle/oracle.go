@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,7 +27,8 @@ import (
 
 // Provider implements cloud.Provider. The identity is a resource principal
 // when the runtime provides one, an instance principal when
-// OCI_CLI_AUTH=instance_principal, and otherwise the API key of the OCI
+// OCI_CLI_AUTH=instance_principal, a session token when
+// OCI_CLI_AUTH=security_token, and otherwise the API key of the OCI
 // configuration file (OCI_CLI_CONFIG_FILE, OCI_CLI_PROFILE).
 type Provider struct{}
 
@@ -39,6 +41,18 @@ func configProvider() (common.ConfigurationProvider, error) {
 	}
 	file := firstNonEmpty(os.Getenv("OCI_CLI_CONFIG_FILE"), os.Getenv("OCI_CONFIG_FILE"))
 	profile := firstNonEmpty(os.Getenv("OCI_CLI_PROFILE"), "DEFAULT")
+	if os.Getenv("OCI_CLI_AUTH") == "security_token" {
+		// A session of `oci session authenticate`: the profile names a
+		// token file instead of a user.
+		if file == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, err
+			}
+			file = filepath.Join(home, ".oci", "config")
+		}
+		return common.CustomProfileSessionTokenConfigProvider(file, profile), nil
+	}
 	if file != "" {
 		return common.CustomProfileConfigProvider(file, profile), nil
 	}
@@ -174,6 +188,11 @@ func signToken(ctx context.Context, signer common.HTTPRequestSigner, region, clu
 // that a user creates by hand, there is none to mint from the identity.
 func (Provider) RegistryCredential(context.Context, cloud.Options) (*cloud.RegistryCredential, error) {
 	return nil, errors.New("Oracle Cloud has no registry token to mint: its registry takes a user's auth token")
+}
+
+// Registries is not available, for the same reason.
+func (Provider) Registries(context.Context, cloud.Options) ([]string, error) {
+	return nil, errors.New("Oracle Cloud registries are not supported")
 }
 
 func firstNonEmpty(values ...string) string {

@@ -128,19 +128,38 @@ func (Provider) Token(ctx context.Context, _ cloud.Options) (*cloud.Token, error
 // RegistryCredential returns a login for Artifact Registry: the access token
 // with the fixed user name the registry expects.
 func (p Provider) RegistryCredential(ctx context.Context, o cloud.Options) (*cloud.RegistryCredential, error) {
-	registry := o.Registry
-	if registry == "" {
-		loc := location(o)
-		if loc == "" {
-			return nil, errors.New("no registry: pass --registry or --region")
-		}
-		registry = loc + "-docker.pkg.dev"
+	registries, err := p.Registries(ctx, o)
+	if err != nil {
+		return nil, err
 	}
+	registry := registries[0]
 	t, err := p.Token(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 	return &cloud.RegistryCredential{Registry: registry, Username: "oauth2accesstoken", Password: t.Value, Expiry: t.Expiry}, nil
+}
+
+// Registries returns the Artifact Registry host of the region, or the
+// registry that was given. It calls nothing.
+func (Provider) Registries(_ context.Context, o cloud.Options) ([]string, error) {
+	if o.Registry != "" {
+		return []string{o.Registry}, nil
+	}
+	region := firstNonEmpty(o.Region, os.Getenv("GOOGLE_REGION"))
+	if region == "" {
+		return nil, errors.New("no registry: pass --registry or --region")
+	}
+	return []string{region + "-docker.pkg.dev"}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // NewStore opens a Cloud Storage bucket.

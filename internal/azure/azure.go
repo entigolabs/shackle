@@ -212,22 +212,51 @@ func (p Provider) RegistryCredential(ctx context.Context, o cloud.Options) (*clo
 	return &cloud.RegistryCredential{Registry: o.Registry, Username: acrUsername, Password: res.RefreshToken}, nil
 }
 
-// loginServer is the host of the registry to log in to. A host name is taken
-// as it is. A bare registry name is looked up in the subscription, and with
-// no registry at all the resource group must hold exactly one.
+// loginServer is the host of the one registry to log in to.
 func (p Provider) loginServer(ctx context.Context, armToken string, o cloud.Options) (string, error) {
+	servers, err := p.registries(ctx, armToken, o)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case len(servers) == 1:
+		return servers[0], nil
+	case o.Registry != "":
+		return "", fmt.Errorf("no container registry named %s in the subscription", o.Registry)
+	case len(servers) == 0:
+		return "", errors.New("no container registry in the resource group")
+	default:
+		return "", fmt.Errorf("several container registries in the resource group, pass --registry: %s", strings.Join(servers, ", "))
+	}
+}
+
+// Registries returns the login servers the options select: a host name as
+// it is, a bare registry name looked up in the subscription, or with no
+// registry every registry of the resource group.
+func (p Provider) Registries(ctx context.Context, o cloud.Options) ([]string, error) {
 	if strings.Contains(o.Registry, ".") || strings.Contains(o.Registry, "://") {
-		return o.Registry, nil
+		return []string{o.Registry}, nil
+	}
+	t, err := p.token(ctx, armScope)
+	if err != nil {
+		return nil, fmt.Errorf("get a token for Azure Resource Manager: %w", err)
+	}
+	return p.registries(ctx, t.Token, o)
+}
+
+func (p Provider) registries(ctx context.Context, armToken string, o cloud.Options) ([]string, error) {
+	if strings.Contains(o.Registry, ".") || strings.Contains(o.Registry, "://") {
+		return []string{o.Registry}, nil
 	}
 	sub := firstNonEmpty(o.Subscription, os.Getenv("AZURE_SUBSCRIPTION_ID"))
 	group := firstNonEmpty(o.ResourceGroup, os.Getenv("AZURE_RESOURCE_GROUP"))
 	if sub == "" {
-		return "", errors.New("no subscription: pass --subscription or set AZURE_SUBSCRIPTION_ID, or pass --registry <name>.azurecr.io")
+		return nil, errors.New("no subscription: pass --subscription or set AZURE_SUBSCRIPTION_ID, or pass --registry <name>.azurecr.io")
 	}
 	scope := "/subscriptions/" + url.PathEscape(sub)
 	if o.Registry == "" {
 		if group == "" {
-			return "", errors.New("no registry: pass --registry, or --resource-group to use the one registry in it")
+			return nil, errors.New("no registry: pass --registry, or --resource-group for the registries in it")
 		}
 		scope += "/resourceGroups/" + url.PathEscape(group)
 	}
@@ -236,12 +265,12 @@ func (p Provider) loginServer(ctx context.Context, armToken string, o cloud.Opti
 	for next != "" {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+armToken)
 		body, err := do(p.http(), req)
 		if err != nil {
-			return "", fmt.Errorf("list the container registries: %w", err)
+			return nil, fmt.Errorf("list the container registries: %w", err)
 		}
 		var page struct {
 			Value []struct {
@@ -253,7 +282,7 @@ func (p Provider) loginServer(ctx context.Context, armToken string, o cloud.Opti
 			NextLink string `json:"nextLink"`
 		}
 		if err := json.Unmarshal(body, &page); err != nil {
-			return "", fmt.Errorf("container registries answer: %w", err)
+			return nil, fmt.Errorf("container registries answer: %w", err)
 		}
 		for _, r := range page.Value {
 			if o.Registry == "" || strings.EqualFold(r.Name, o.Registry) {
@@ -262,16 +291,7 @@ func (p Provider) loginServer(ctx context.Context, armToken string, o cloud.Opti
 		}
 		next = page.NextLink
 	}
-	switch {
-	case len(servers) == 1:
-		return servers[0], nil
-	case o.Registry != "":
-		return "", fmt.Errorf("no container registry named %s in the subscription", o.Registry)
-	case len(servers) == 0:
-		return "", fmt.Errorf("no container registry in resource group %s", group)
-	default:
-		return "", fmt.Errorf("several container registries in resource group %s, pass --registry: %s", group, strings.Join(servers, ", "))
-	}
+	return servers, nil
 }
 
 // registryURL is the registry's base URL; a test server's URL is kept as is.

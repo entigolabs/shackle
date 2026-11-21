@@ -61,4 +61,7 @@ type Provider interface {
 	Token(ctx context.Context, o Options) (*Token, error)
 	// RegistryCredential returns a login for the cloud's container registry.
 	RegistryCredential(ctx context.Context, o Options) (*RegistryCredential, error)
+	// Registries returns the hosts of the identity's container registries
+	// that the options select; none is not an error.
+	Registries(ctx context.Context, o Options) ([]string, error)
 }

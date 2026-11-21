@@ -237,6 +237,13 @@ func TestRegistryLookup(t *testing.T) {
 	if _, err := p.loginServer(ctx, "t", cloud.Options{Subscription: "sub", ResourceGroup: "none"}); err == nil {
 		t.Error("an empty resource group gave a registry")
 	}
+	// Listing is not choosing: none and several are both fine.
+	if list, err := p.Registries(ctx, cloud.Options{Subscription: "sub", ResourceGroup: "none"}); err != nil || len(list) != 0 {
+		t.Errorf("Registries of an empty group = %v %v", list, err)
+	}
+	if list, err := p.Registries(ctx, cloud.Options{Subscription: "sub", ResourceGroup: "two"}); err != nil || len(list) != 2 {
+		t.Errorf("Registries of a group with two = %v %v", list, err)
+	}
 	if _, err := p.loginServer(ctx, "t", cloud.Options{Registry: "absent", Subscription: "sub"}); err == nil {
 		t.Error("an unknown registry name was found")
 	}

@@ -96,3 +96,12 @@ func TestDecodeECRToken(t *testing.T) {
 		t.Error("a token without a password was accepted")
 	}
 }
+
+func TestECRHost(t *testing.T) {
+	if got := ecrHost("123456789012", "eu-north-1", "arn:aws:sts::123456789012:assumed-role/r/s"); got != "123456789012.dkr.ecr.eu-north-1.amazonaws.com" {
+		t.Errorf("ecrHost = %s", got)
+	}
+	if got := ecrHost("123456789012", "cn-north-1", "arn:aws-cn:iam::123456789012:user/u"); got != "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn" {
+		t.Errorf("ecrHost in China = %s", got)
+	}
+}

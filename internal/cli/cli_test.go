@@ -23,6 +23,7 @@ type fakeProvider struct {
 	cluster    *cloud.Cluster
 	token      *cloud.Token
 	registry   *cloud.RegistryCredential
+	hosts      []string
 	err        error
 	tokenCalls int
 	lastToken  cloud.Options
@@ -43,6 +44,11 @@ func (f *fakeProvider) Token(_ context.Context, o cloud.Options) (*cloud.Token, 
 func (f *fakeProvider) RegistryCredential(_ context.Context, o cloud.Options) (*cloud.RegistryCredential, error) {
 	f.lastOpts = o
 	return f.registry, f.err
+}
+
+func (f *fakeProvider) Registries(_ context.Context, o cloud.Options) ([]string, error) {
+	f.lastOpts = o
+	return f.hosts, f.err
 }
 
 func newEnv(t *testing.T, p *fakeProvider) (*env, *bytes.Buffer, *bytes.Buffer) {
@@ -265,5 +271,22 @@ func TestSyncPassesOptions(t *testing.T) {
 	}
 	if code := e.run(context.Background(), []string{"sync", "only-one"}); code != 2 {
 		t.Errorf("one argument: exit %d, want 2", code)
+	}
+}
+
+func TestRegistries(t *testing.T) {
+	p := &fakeProvider{hosts: []string{"a.example", "b.example"}}
+	e, out, _ := newEnv(t, p)
+	if code := e.run(context.Background(), []string{"registries", "aws", "--resource-group", "rg"}); code != 0 || out.String() != "a.example\nb.example\n" {
+		t.Errorf("exit %d, output %q", code, out)
+	}
+	if p.lastOpts.ResourceGroup != "rg" {
+		t.Errorf("options = %+v", p.lastOpts)
+	}
+	// None is an empty answer, not a failure.
+	p.hosts = nil
+	out.Reset()
+	if code := e.run(context.Background(), []string{"registries", "aws"}); code != 0 || out.String() != "" {
+		t.Errorf("no registries: exit %d, output %q", code, out)
 	}
 }

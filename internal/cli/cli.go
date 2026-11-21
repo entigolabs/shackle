@@ -31,6 +31,7 @@ Usage:
   shackle kubeconfig <cloud> --cluster NAME [flags]   write a kubeconfig entry
   shackle token <cloud> [flags]                       print a cluster token (kubectl credential plugin)
   shackle registry-token <cloud> [flags]              print a container registry password
+  shackle registries <cloud> [flags]                  print the container registry hosts
   shackle cp [--recursive] SOURCE DESTINATION         copy to or from object storage
   shackle sync [--delete] DIRECTORY DESTINATION       make an object storage prefix match a directory
   shackle version
@@ -103,6 +104,8 @@ func (e *env) run(ctx context.Context, args []string) int {
 		err = e.token(ctx, rest)
 	case "registry-token":
 		err = e.registryToken(ctx, rest)
+	case "registries":
+		err = e.registries(ctx, rest)
 	case "cp":
 		err = e.cp(ctx, rest)
 	case "sync":
@@ -331,13 +334,43 @@ func (e *env) token(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (e *env) registryToken(ctx context.Context, args []string) error {
-	fs := e.newFlags("registry-token", "registry-token <cloud> [flags]")
-	var o cloud.Options
+// registryFlags are the flags that say which registry is meant.
+func registryFlags(fs *flag.FlagSet, o *cloud.Options) {
 	fs.StringVar(&o.Region, "region", "", "region of the registry (aws, google); default from AWS_REGION, GOOGLE_REGION")
 	fs.StringVar(&o.Registry, "registry", "", "registry host (google: default <region>-docker.pkg.dev; azure: <name>.azurecr.io or a registry name)")
 	fs.StringVar(&o.Subscription, "subscription", "", "azure: subscription ID, to look a registry up; default from AZURE_SUBSCRIPTION_ID")
-	fs.StringVar(&o.ResourceGroup, "resource-group", "", "azure: without --registry, the resource group that holds the one registry; default from AZURE_RESOURCE_GROUP")
+	fs.StringVar(&o.ResourceGroup, "resource-group", "", "azure: without --registry, the resource group of the registry; default from AZURE_RESOURCE_GROUP")
+}
+
+// registries prints the registry hosts, one a line; none is not an error.
+func (e *env) registries(ctx context.Context, args []string) error {
+	fs := e.newFlags("registries", "registries <cloud> [flags]")
+	var o cloud.Options
+	registryFlags(fs, &o)
+	positional, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	_, p, err := e.provider(positional)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	hosts, err := p.Registries(ctx, o)
+	if err != nil {
+		return err
+	}
+	for _, h := range hosts {
+		fmt.Fprintln(e.stdout, h)
+	}
+	return nil
+}
+
+func (e *env) registryToken(ctx context.Context, args []string) error {
+	fs := e.newFlags("registry-token", "registry-token <cloud> [flags]")
+	var o cloud.Options
+	registryFlags(fs, &o)
 	output := fs.String("output", "password", "what to print: password, or json with registry, username, password and expiresAt")
 	positional, err := parse(fs, args)
 	if err != nil {

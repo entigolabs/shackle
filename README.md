@@ -14,7 +14,7 @@ about 35 MB.
 | --- | --- | --- | --- | --- |
 | `shackle kubeconfig` | EKS | GKE | AKS | OKE |
 | `shackle token` | EKS | GKE | AKS | OKE |
-| `shackle registry-token` | ECR | Artifact Registry | ACR | not available |
+| `shackle registry-token`, `shackle registries` | ECR | Artifact Registry | ACR | not available |
 | `shackle cp`, `shackle sync` | `s3://` | `gs://` | `az://` | `oci://` |
 
 ## Install
@@ -25,7 +25,7 @@ Binaries for Linux (`amd64`, `arm64`) are attached to every
 [release](https://github.com/entigolabs/shackle/releases).
 
 ```bash
-VERSION=v0.1.3   # the release you want
+VERSION=v0.1.4   # the release you want
 ARCH=amd64       # or arm64
 curl -fsSLO "https://github.com/entigolabs/shackle/releases/download/${VERSION}/shackle-linux-${ARCH}"
 curl -fsSLO "https://github.com/entigolabs/shackle/releases/download/${VERSION}/SHA256SUMS"
@@ -36,7 +36,7 @@ install -m 0755 "shackle-linux-${ARCH}" /usr/local/bin/shackle
 ### Container image
 
 ```bash
-docker run --rm ghcr.io/entigolabs/shackle:v0.1.3 version
+docker run --rm ghcr.io/entigolabs/shackle:v0.1.4 version
 ```
 
 The image is distroless: it holds the binary and CA certificates, no shell. To
@@ -44,7 +44,7 @@ use `shackle` together with `kubectl` or `helm`, copy the binary into your own
 image:
 
 ```dockerfile
-COPY --from=ghcr.io/entigolabs/shackle:v0.1.3 /usr/local/bin/shackle /usr/local/bin/shackle
+COPY --from=ghcr.io/entigolabs/shackle:v0.1.4 /usr/local/bin/shackle /usr/local/bin/shackle
 ```
 
 ### Verify a release
@@ -87,7 +87,7 @@ identity the job already has, found the way each cloud's SDK finds it:
 | AWS | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, a profile, web identity (OIDC), or the role of the container or instance |
 | Google Cloud | Application Default Credentials: the key file named by `GOOGLE_APPLICATION_CREDENTIALS`, workload identity federation, or the metadata server |
 | Azure | a service principal in `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`, workload identity, or a managed identity |
-| Oracle Cloud | the API key of the OCI configuration file (`OCI_CLI_CONFIG_FILE`, `OCI_CLI_PROFILE`), a resource principal, or an instance principal with `OCI_CLI_AUTH=instance_principal` |
+| Oracle Cloud | the API key of the OCI configuration file (`OCI_CLI_CONFIG_FILE`, `OCI_CLI_PROFILE`), a resource principal, an instance principal with `OCI_CLI_AUTH=instance_principal`, or a session token with `OCI_CLI_AUTH=security_token` |
 
 ## Kubernetes access
 
@@ -192,6 +192,19 @@ cloud tells it, the expiry:
 Oracle's registry takes an auth token that a user creates by hand; there is
 nothing to mint from the job's identity.
 
+### `shackle registries`
+
+Prints the host of the registry, one a line, without logging in:
+
+```bash
+shackle registries aws --region eu-north-1                  # 123456789012.dkr.ecr.eu-north-1.amazonaws.com
+shackle registries google --region europe-north1            # europe-north1-docker.pkg.dev
+shackle registries azure --resource-group my-group          # every registry of the group; none prints nothing
+shackle registries azure --registry myregistry              # myregistry.azurecr.io, looked up by name
+```
+
+On AWS this asks only who the identity is, so it needs no permission.
+
 ## Object storage
 
 ### `shackle cp`
@@ -267,7 +280,7 @@ steps:
   - name: Install shackle
     run: |
       curl -fsSL -o /usr/local/bin/shackle \
-        https://github.com/entigolabs/shackle/releases/download/v0.1.3/shackle-linux-amd64
+        https://github.com/entigolabs/shackle/releases/download/v0.1.4/shackle-linux-amd64
       chmod +x /usr/local/bin/shackle
   - run: |
       shackle kubeconfig aws --cluster my-eks

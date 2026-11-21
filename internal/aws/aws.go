@@ -131,6 +131,31 @@ func (Provider) RegistryCredential(ctx context.Context, o cloud.Options) (*cloud
 	return decodeECRToken(*data.AuthorizationToken, awssdk.ToString(data.ProxyEndpoint), awssdk.ToTime(data.ExpiresAt))
 }
 
+// Registries returns the host of the account's private ECR registry in the
+// region. It asks STS who the identity is, which needs no permission, so it
+// works for an identity that may not log in to the registry.
+func (Provider) Registries(ctx context.Context, o cloud.Options) ([]string, error) {
+	cfg, err := loadConfig(ctx, o.Region)
+	if err != nil {
+		return nil, err
+	}
+	out, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return nil, fmt.Errorf("get the caller identity: %w", err)
+	}
+	return []string{ecrHost(awssdk.ToString(out.Account), cfg.Region, awssdk.ToString(out.Arn))}, nil
+}
+
+// ecrHost is the registry host of an account in a region; the identity's ARN
+// tells the partition, which decides the domain.
+func ecrHost(account, region, arn string) string {
+	domain := "amazonaws.com"
+	if strings.HasPrefix(arn, "arn:aws-cn:") {
+		domain = "amazonaws.com.cn"
+	}
+	return fmt.Sprintf("%s.dkr.ecr.%s.%s", account, region, domain)
+}
+
 // decodeECRToken splits ECR's base64 "user:password" token.
 func decodeECRToken(token, endpoint string, expiry time.Time) (*cloud.RegistryCredential, error) {
 	raw, err := base64.StdEncoding.DecodeString(token)
