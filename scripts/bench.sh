@@ -16,6 +16,7 @@
 #   BENCH_REGISTRY  azure: registry name
 #   BENCH_RUNS      runs per case (default 5); the median is reported
 #   BENCH_IMAGE     the CLI image, to pin a version
+#   BENCH_DOCKER_ARGS  more arguments for docker run (a user, say)
 #
 # Per cloud also what its CLI needs: GOOGLE_PROJECT; AZURE_RESOURCE_GROUP;
 # OCI_COMPARTMENT_ID and BENCH_OCI_DIR (the directory with the OCI config).
@@ -98,8 +99,12 @@ if [ "${2:-}" = --inner ]; then
       row "Start (print the version)" "shackle version" "az version"
       if [ -n "$c" ]; then
         row "Write a kubeconfig" "shackle kubeconfig azure --cluster $c --resource-group $g --subscription $sub --kubeconfig $work/kc-s" "az aks get-credentials --name $c --resource-group $g --file $work/kc-c --overwrite-existing && kubelogin convert-kubeconfig -l spn --kubeconfig $work/kc-c"
-        row "Kubernetes token" "shackle token azure --no-cache" "kubelogin get-token -l spn --server-id 6dae42f8-4368-4678-94ff-3960e28e3630 --client-id $AZURE_CLIENT_ID --client-secret $AZURE_CLIENT_SECRET --tenant-id $AZURE_TENANT_ID"
-        row "Kubernetes token, cached" "shackle token azure" -
+        # kubelogin reads its secret from AAD_SERVICE_PRINCIPAL_CLIENT_SECRET
+        # and keeps tokens in a directory; without it, it asks Entra.
+        export AAD_SERVICE_PRINCIPAL_CLIENT_ID=$AZURE_CLIENT_ID AAD_SERVICE_PRINCIPAL_CLIENT_SECRET=$AZURE_CLIENT_SECRET
+        kl="kubelogin get-token -l spn --server-id 6dae42f8-4368-4678-94ff-3960e28e3630 --tenant-id $AZURE_TENANT_ID --token-cache-dir $work/kubelogin"
+        row "Kubernetes token" "shackle token azure --no-cache" "rm -rf $work/kubelogin; $kl"
+        row "Kubernetes token, cached" "shackle token azure" "$kl"
       fi
       if [ -n "${BENCH_REGISTRY:-}" ]; then
         row "Registry password" "shackle registry-token azure --registry $BENCH_REGISTRY" "az acr login --name $BENCH_REGISTRY --expose-token --output none"
@@ -157,7 +162,9 @@ case $cloud in
   oracle)
     image=${BENCH_IMAGE:-ghcr.io/oracle/oci-cli:latest}
     pass OCI_COMPARTMENT_ID OCI_CLI_AUTH OCI_CLI_PROFILE
-    args+=(-v "${BENCH_OCI_DIR:-$HOME/.oci}:/oracle/.oci:ro" -e OCI_CLI_CONFIG_FILE=/oracle/.oci/config) ;;
+    # At the path it has here, so that the key_file of the config resolves.
+    oci_dir=${BENCH_OCI_DIR:-$HOME/.oci}
+    args+=(-v "$oci_dir:$oci_dir:ro" -e "OCI_CLI_CONFIG_FILE=$oci_dir/config") ;;
   *) echo "unknown cloud $cloud" >&2; exit 1 ;;
 esac
 # shellcheck disable=SC2086
