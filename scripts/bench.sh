@@ -39,12 +39,12 @@ if [ "${2:-}" = --inner ]; then
     local i s e out times=()
     for i in $(seq "$runs"); do
       if [ -n "$before" ] && ! out=$(bash -c "$before" 2>&1 >/dev/null); then echo "failed before $* : $out" >&2; echo failed; return 0; fi
-      s=$(date +@DIR@%N)
+      s=$(date +%s%N)
       if ! out=$("$@" 2>&1 >/dev/null); then echo "failed: $* : $out" >&2; echo failed; return 0; fi
-      e=$(date +@DIR@%N)
+      e=$(date +%s%N)
       times+=($(((e - s) / 1000000)))
     done
-    printf '@DIR@\n' "${times[@]}" | sort -n | sed -n "$(((runs + 1) / 2))p"
+    printf '%s\n' "${times[@]}" | sort -n | sed -n "$(((runs + 1) / 2))p"
   }
 
   # row LABEL SHACKLE_COMMAND CLI_COMMAND: one table line. Commands are shell
@@ -53,7 +53,7 @@ if [ "${2:-}" = --inner ]; then
     local label=$1 a=- b=-
     [ "$2" = - ] || a=$(median_ms bash -c "$2")
     [ "$3" = - ] || b=$(median_ms bash -c "$3")
-    printf '| @DIR@ | @DIR@ | @DIR@ |\n' "$label" "$a" "$b"
+    printf '| %s | %s | %s |\n' "$label" "$a" "$b"
   }
 
   mkdir -p "$work/small" "$work/down-s" "$work/down-c"
@@ -88,7 +88,7 @@ if [ "${2:-}" = --inner ]; then
     before="touch -d '1 minute' $work/small/*; ${2//@DIR@/$work/small}; touch -d '1 minute' $work/changed/*"
     b_=$(median_ms bash -c "${2//@DIR@/$work/changed}")
     before=""
-    printf '| @DIR@ | @DIR@ | @DIR@ |\n' "$label" "$a" "$b_"
+    printf '| %s | %s | %s |\n' "$label" "$a" "$b_"
     for tool in s c; do
       mkdir -p "$work/synced-$tool"
       shackle cp -r "$b/$tool/sync" "$work/synced-$tool" --quiet
