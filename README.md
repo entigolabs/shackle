@@ -6,9 +6,10 @@ Oracle Cloud. No cloud CLIs needed.
 
 A pipeline that only has to reach a Kubernetes cluster, log in to a registry or
 fetch a few files from a bucket usually installs a whole cloud CLI to do it:
-hundreds of megabytes and several seconds of start-up per call. `shackle` does
-those three jobs with the job's own cloud identity, from one static binary of
-about 35 MB.
+hundreds of megabytes, and a Python start-up of a few hundred milliseconds on
+every call. `shackle` does those three jobs with the job's own cloud identity,
+from one static binary of about 35 MB. [Compared with the cloud
+CLIs](#compared-with-the-cloud-clis) has the measurements.
 
 | | AWS | Google Cloud | Azure | Oracle Cloud |
 | --- | --- | --- | --- | --- |
@@ -235,8 +236,9 @@ shackle cp oci://my-bucket@my-namespace/config.yaml .
 A prefix is a directory: `s3://bucket/steps/a` does not match
 `steps/ab/file`. A key that would land outside the destination directory
 (`../`) is refused. Symbolic links are followed on upload. A recursive
-download gives each file the modification time of its object. There is no
-copy from one bucket to another.
+download gives each file the modification time of its object. A recursive
+copy, like `sync`, transfers sixteen files at a time and stops at the first
+failure. There is no copy from one bucket to another.
 
 ### `shackle sync`
 
@@ -295,6 +297,65 @@ deploy:
   script:
     - shackle kubeconfig google --cluster my-gke --region europe-north1 --project my-project
     - helm upgrade --install my-app ./chart
+```
+
+## Compared with the cloud CLIs
+
+What a pipeline downloads (compressed size, `linux/amd64`):
+
+| | Size |
+| --- | --- |
+| `ghcr.io/entigolabs/shackle` | 12 MB |
+| shackle binary | 36 MB (11 MB gzipped) |
+| `amazon/aws-cli` 2.42.2 | 136 MB |
+| `google-cloud-cli` 594.0.1 | 854 MB (`slim`, without the GKE credential plugin: 246 MB) |
+| `azure-cli` 2.93.0 | 147 MB, without `kubelogin` |
+| `oci-cli` 3.96.3 | 192 MB |
+
+How long the same job takes, in milliseconds, written as shackle / the
+cloud's CLI. Both ran inside the CLI's image, from a GitHub-hosted runner,
+against clusters and buckets in northern and central Europe; each number is
+the median of five runs (shackle v0.1.6, November 2026).
+
+| | AWS | Google Cloud | Azure | Oracle Cloud |
+| --- | --- | --- | --- | --- |
+| Start (print the version) | 8 / 454 | 8 / 405 | 7 / 130 | 7 / 294 |
+| Kubernetes token | 9 / 551 | 80 / 482 | 660 / 655 | 8 / 365 |
+| Kubernetes token, cached | 8 / none | 9 / 4 | 7 / 671 | 7 / none |
+| Write a kubeconfig | 614 / 1166 | 1188 / 1854 | 1082 / 853 | 369 / 832 |
+| Registry password | 520 / 1014 | 82 / 467 | 2272 / 2945 | not available |
+| Upload one 10 MiB file | 2580 / 3599 | 3284 / 6330 | 2726 / 2805 | 1557 / 1880 |
+| Upload 200 files of 4 KiB | 2773 / 4807 | 8365 / 8555 | 3270 / 32793 | 3090 / 3561 |
+| Download 200 files of 4 KiB | 3215 / 5227 | 7589 / 7351 | 4424 / 34519 | 2276 / 3387 |
+
+- **Where the time goes.** A cloud CLI spends 0.1 to 0.5 s starting before it
+  does anything. An EKS or OKE token is a signature made locally, so with no
+  start-up cost it takes milliseconds. `kubectl` asks for a token on every
+  call, which is where this adds up: `aws`, `oci` and `kubelogin` (for a
+  service principal) keep no token between calls, shackle caches it.
+- **Where shackle is not faster.** A new Azure token is one round trip to
+  Entra ID for either tool. `gke-gcloud-auth-plugin` answers from its own
+  cache as fast as shackle does. Copies of many small files to Google Cloud
+  Storage took the same time with both.
+- **Variation.** The rows that talk to a cloud moved by up to 40 % between two
+  runs an hour apart; a difference smaller than that, such as the Azure
+  kubeconfig, is not a difference.
+- **The CLIs compared:** `aws eks get-token`, `aws eks update-kubeconfig`,
+  `aws ecr get-login-password`, `aws s3 cp`; `gke-gcloud-auth-plugin`,
+  `gcloud container clusters get-credentials`, `gcloud auth
+  print-access-token`, `gcloud storage cp`; `kubelogin get-token`, `az aks
+  get-credentials` with `kubelogin convert-kubeconfig`, `az acr login
+  --expose-token`, `az storage blob upload-batch` and `download-batch`; `oci ce
+  cluster generate-token`, `oci ce cluster create-kubeconfig`, `oci os object
+  put`, `bulk-upload` and `bulk-download`.
+
+`scripts/bench.sh` is the script behind the table. It runs against your own
+cluster and bucket:
+
+```bash
+scripts/build.sh
+BENCH_CLUSTER=my-cluster BENCH_REGION=eu-north-1 \
+BENCH_BUCKET=s3://my-bucket/shackle-bench scripts/bench.sh aws
 ```
 
 ## Limits

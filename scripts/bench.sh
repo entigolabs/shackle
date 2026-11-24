@@ -79,7 +79,9 @@ if [ "${2:-}" = --inner ]; then
       p=${GOOGLE_PROJECT:-}
       row "Start (print the version)" "shackle version" "gcloud --version"
       if [ -n "$c" ]; then
-        # The plugin keeps its token in a file; without it, it asks gcloud.
+        # The plugin keeps its token in a file next to the kubeconfig, if
+        # that directory exists; without the file it asks gcloud.
+        mkdir -p "$HOME/.kube"
         row "Kubernetes token" "shackle token google --no-cache" "rm -f \$HOME/.kube/gke_gcloud_auth_plugin_cache; gke-gcloud-auth-plugin"
         row "Kubernetes token, cached" "shackle token google" "gke-gcloud-auth-plugin"
         row "Write a kubeconfig" "shackle kubeconfig google --cluster $c --region $r --project $p --kubeconfig $work/kc-s" "KUBECONFIG=$work/kc-c gcloud container clusters get-credentials $c --location $r --project $p"
