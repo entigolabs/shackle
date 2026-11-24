@@ -111,10 +111,29 @@ jobs:
           cosign verify-blob --bundle SHA256SUMS.sigstore.json \
             --certificate-oidc-issuer "$ISSUER" --certificate-identity-regexp "$IDENTITY" SHA256SUMS
 
+      # What changed comes first: the commits since the previous release. A
+      # merged pull request is one commit whose subject ends in its number,
+      # which GitHub turns into a link.
       - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          previous=$(gh release list --limit 20 --json tagName,isDraft,isPrerelease \
+            --jq "[.[] | select(.isDraft or .isPrerelease | not) | .tagName | select(. != \"$VERSION\")][0] // empty")
           {
+            echo "## Changes"
+            echo
+            if [ -n "$previous" ]; then
+              gh api "repos/${GH_REPO}/compare/${previous}...${GITHUB_SHA}" \
+                --jq '.commits[] | "- " + (.commit.message | split("\n")[0]) + " (" + .sha[0:7] + ")"'
+              echo
+              echo "Everything since ${previous}: https://github.com/${GH_REPO}/compare/${previous}...${VERSION}"
+            else
+              echo "First release."
+            fi
+            echo
             echo "## Binaries"
             echo
             echo '```'
@@ -165,5 +184,5 @@ jobs:
             gh release upload "$VERSION" --clobber dist/*
           else
             gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" \
-              --generate-notes --notes-file notes.md --latest dist/*
+              --notes-file notes.md --latest dist/*
           fi
