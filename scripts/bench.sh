@@ -88,13 +88,15 @@ if [ "${2:-}" = --inner ]; then
     before="touch -d '1 minute' $work/small/*; ${2//@DIR@/$work/small}; touch -d '1 minute' $work/changed/*"
     b_=$(median_ms bash -c "${2//@DIR@/$work/changed}")
     before=""
-    printf '| %s | %s | %s |\n' "$label" "$a" "$b_"
+    # A sync that left something else in the bucket has no time worth reporting.
     for tool in s c; do
       mkdir -p "$work/synced-$tool"
       shackle cp -r "$b/$tool/sync" "$work/synced-$tool" --quiet
-      [ "$(listing "$work/synced-$tool")" = "$(listing "$work/changed")" ] ||
-        echo "failed: after the sync of $([ $tool = s ] && echo shackle || echo the cloud CLI) the bucket does not hold what the directory holds" >&2
+      [ "$(listing "$work/synced-$tool")" = "$(listing "$work/changed")" ] && continue
+      echo "failed: after the sync of $([ $tool = s ] && echo shackle || echo the cloud CLI) the bucket does not hold what the directory holds" >&2
+      if [ $tool = s ]; then a=failed; else b_=failed; fi
     done
+    printf '| %s | %s | %s |\n' "$label" "$a" "$b_"
   }
 
   c=${BENCH_CLUSTER:-} r=${BENCH_REGION:-} b=${BENCH_BUCKET:-}
