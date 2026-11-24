@@ -315,18 +315,19 @@ What a pipeline downloads (compressed size, `linux/amd64`):
 How long the same job takes, in milliseconds, written as shackle / the
 cloud's CLI. Both ran inside the CLI's image, from a GitHub-hosted runner,
 against clusters and buckets in northern and central Europe; each number is
-the median of five runs (shackle v0.1.6, November 2026).
+the median of five runs (shackle v0.1.8, November 2026).
 
 | | AWS | Google Cloud | Azure | Oracle Cloud |
 | --- | --- | --- | --- | --- |
-| Start (print the version) | 8 / 454 | 8 / 405 | 7 / 130 | 7 / 294 |
-| Kubernetes token | 9 / 551 | 80 / 482 | 660 / 655 | 8 / 365 |
-| Kubernetes token, cached | 8 / none | 9 / 4 | 7 / 671 | 7 / none |
-| Write a kubeconfig | 614 / 1166 | 1188 / 1854 | 1082 / 853 | 369 / 832 |
-| Registry password | 520 / 1014 | 82 / 467 | 2272 / 2945 | not available |
-| Upload one 10 MiB file | 2580 / 3599 | 3284 / 6330 | 2726 / 2805 | 1557 / 1880 |
-| Upload 200 files of 4 KiB | 2773 / 4807 | 8365 / 8555 | 3270 / 32793 | 3090 / 3561 |
-| Download 200 files of 4 KiB | 3215 / 5227 | 7589 / 7351 | 4424 / 34519 | 2276 / 3387 |
+| Start (print the version) | 10 / 484 | 8 / 340 | 12 / 210 | 9 / 300 |
+| Kubernetes token | 11 / 611 | 67 / 413 | 577 / 394 | 10 / 349 |
+| Kubernetes token, cached | 10 / none | 8 / 4 | 12 / 584 | 8 / none |
+| Write a kubeconfig | 536 / 1130 | 775 / 1333 | 934 / 1047 | 883 / 1187 |
+| Registry password | 383 / 959 | 69 / 389 | 1880 / 2345 | not available |
+| Upload one 10 MiB file | 1464 / 2689 | 1556 / 3748 | 2025 / 2404 | 2190 / 2606 |
+| Upload 200 files of 4 KiB | 2139 / 3749 | 5245 / 6423 | 2345 / 23878 | 3834 / 4213 |
+| Download 200 files of 4 KiB | 2343 / 3931 | 4953 / 5285 | 3243 / 24219 | 2770 / 4134 |
+| Sync 200 files: 50 deleted, 50 changed, 50 new | 3044 / 4832 | 5019 / 6113 | 3763 / 12713 | 5046 / 8722 |
 
 - **Where the time goes.** A cloud CLI spends 0.1 to 0.5 s starting before it
   does anything. An EKS or OKE token is a signature made locally, so with no
@@ -336,18 +337,22 @@ the median of five runs (shackle v0.1.6, November 2026).
 - **Where shackle is not faster.** A new Azure token is one round trip to
   Entra ID for either tool. `gke-gcloud-auth-plugin` answers from its own
   cache as fast as shackle does. Copies of many small files to Google Cloud
-  Storage took the same time with both.
+  Storage take about the same time with both.
+- **The sync case.** A prefix holds 200 files; the directory has lost 50 of
+  them, has 50 with other content and 50 new ones. Timed is `sync --delete`
+  bringing the prefix in line, and what it left there is compared with the
+  directory afterwards.
 - **Variation.** The rows that talk to a cloud moved by up to 40 % between two
   runs an hour apart; a difference smaller than that, such as the Azure
   kubeconfig, is not a difference.
 - **The CLIs compared:** `aws eks get-token`, `aws eks update-kubeconfig`,
-  `aws ecr get-login-password`, `aws s3 cp`; `gke-gcloud-auth-plugin`,
+  `aws ecr get-login-password`, `aws s3 cp` and `sync`; `gke-gcloud-auth-plugin`,
   `gcloud container clusters get-credentials`, `gcloud auth
-  print-access-token`, `gcloud storage cp`; `kubelogin get-token`, `az aks
+  print-access-token`, `gcloud storage cp` and `rsync`; `kubelogin get-token`, `az aks
   get-credentials` with `kubelogin convert-kubeconfig`, `az acr login
-  --expose-token`, `az storage blob upload-batch` and `download-batch`; `oci ce
+  --expose-token`, `az storage blob upload-batch`, `download-batch` and `sync`; `oci ce
   cluster generate-token`, `oci ce cluster create-kubeconfig`, `oci os object
-  put`, `bulk-upload` and `bulk-download`.
+  put`, `bulk-upload`, `bulk-download` and `sync`.
 
 `scripts/bench.sh` is the script behind the table. It runs against your own
 cluster and bucket:

@@ -32,10 +32,13 @@ if [ "${2:-}" = --inner ]; then
   export SHACKLE_CACHE_DIR=$work/cache
 
   # median_ms COMMAND...: the median wall time of the command, in ms; "failed"
-  # if any run fails, with the output of that run on stderr.
+  # if any run fails, with the output of that run on stderr. $before, a shell
+  # snippet, runs ahead of every run and is not timed.
+  before=""
   median_ms() {
     local i s e out times=()
     for i in $(seq "$runs"); do
+      if [ -n "$before" ] && ! out=$(bash -c "$before" 2>&1 >/dev/null); then echo "failed before $* : $out" >&2; echo failed; return 0; fi
       s=$(date +%s%N)
       if ! out=$("$@" 2>&1 >/dev/null); then echo "failed: $* : $out" >&2; echo failed; return 0; fi
       e=$(date +%s%N)
@@ -57,6 +60,45 @@ if [ "${2:-}" = --inner ]; then
   head -c 10485760 /dev/urandom > "$work/big"
   for i in $(seq 200); do head -c 4096 /dev/urandom > "$work/small/file-$i"; done
 
+  # The directory of the sync case: the 200 files with 50 of them gone, 50
+  # changed (other content, other size) and 50 new ones.
+  cp -r "$work/small" "$work/changed"
+  for i in $(seq 1 50); do rm "$work/changed/file-$i"; done
+  for i in $(seq 51 100); do head -c 5000 /dev/urandom > "$work/changed/file-$i"; done
+  for i in $(seq 201 250); do head -c 4096 /dev/urandom > "$work/changed/file-$i"; done
+
+  # listing DIR: the names and sizes of its files, for comparing two directories.
+  listing() {
+    local f
+    for f in "$1"/*; do echo "${f##*/} $(wc -c < "$f")"; done | sort
+  }
+
+  # sync_row SHACKLE_SYNC CLI_SYNC: the table line of the sync case. Each
+  # argument is a sync command with @DIR@ where the local directory goes; the
+  # destinations are $b/s/sync and $b/c/sync. Before every run the tool syncs
+  # the 200 original files, so that the timed sync has the same work each
+  # time: delete 50 objects, replace 50 and add 50. Files are given a time
+  # in the near future first, as the tools that go by time copy only what is
+  # newer than its object. Afterwards what each tool left in the bucket is
+  # downloaded and compared with the directory.
+  sync_row() {
+    local label="Sync 200 files: 50 deleted, 50 changed, 50 new" a b_ tool
+    before="touch -d '1 minute' $work/small/*; ${1//@DIR@/$work/small}; touch -d '1 minute' $work/changed/*"
+    a=$(median_ms bash -c "${1//@DIR@/$work/changed}")
+    before="touch -d '1 minute' $work/small/*; ${2//@DIR@/$work/small}; touch -d '1 minute' $work/changed/*"
+    b_=$(median_ms bash -c "${2//@DIR@/$work/changed}")
+    before=""
+    # A sync that left something else in the bucket has no time worth reporting.
+    for tool in s c; do
+      mkdir -p "$work/synced-$tool"
+      shackle cp -r "$b/$tool/sync" "$work/synced-$tool" --quiet
+      [ "$(listing "$work/synced-$tool")" = "$(listing "$work/changed")" ] && continue
+      echo "failed: after the sync of $([ $tool = s ] && echo shackle || echo the cloud CLI) the bucket does not hold what the directory holds" >&2
+      if [ $tool = s ]; then a=failed; else b_=failed; fi
+    done
+    printf '| %s | %s | %s |\n' "$label" "$a" "$b_"
+  }
+
   c=${BENCH_CLUSTER:-} r=${BENCH_REGION:-} b=${BENCH_BUCKET:-}
   echo "| ${cloud}, median of ${runs} runs, ms | shackle | cloud CLI |"
   echo "| --- | --- | --- |"
@@ -73,6 +115,7 @@ if [ "${2:-}" = --inner ]; then
         row "Upload one 10 MiB file" "shackle cp $work/big $b/s/big --quiet" "aws s3 cp $work/big $b/c/big --only-show-errors"
         row "Upload 200 files of 4 KiB" "shackle cp -r $work/small $b/s/small --quiet" "aws s3 cp --recursive $work/small $b/c/small --only-show-errors"
         row "Download 200 files of 4 KiB" "shackle cp -r $b/s/small $work/down-s --quiet" "aws s3 cp --recursive $b/c/small $work/down-c --only-show-errors"
+        sync_row "shackle sync @DIR@ $b/s/sync --delete --quiet" "aws s3 sync @DIR@ $b/c/sync --delete --only-show-errors"
         aws s3 rm --recursive "$b" --only-show-errors
       fi ;;
     google)
@@ -91,6 +134,7 @@ if [ "${2:-}" = --inner ]; then
         row "Upload one 10 MiB file" "shackle cp $work/big $b/s/big --quiet" "gcloud storage cp $work/big $b/c/big --quiet"
         row "Upload 200 files of 4 KiB" "shackle cp -r $work/small $b/s/small --quiet" "gcloud storage cp --recursive $work/small $b/c/ --quiet"
         row "Download 200 files of 4 KiB" "shackle cp -r $b/s/small $work/down-s --quiet" "gcloud storage cp --recursive $b/c/small $work/down-c --quiet"
+        sync_row "shackle sync @DIR@ $b/s/sync --delete --quiet" "gcloud storage rsync --recursive --delete-unmatched-destination-objects @DIR@ $b/c/sync --quiet"
         gcloud storage rm --recursive "$b" --quiet >/dev/null 2>&1
       fi ;;
     azure)
@@ -115,6 +159,8 @@ if [ "${2:-}" = --inner ]; then
         row "Upload one 10 MiB file" "shackle cp $work/big $b/s/big --quiet" "az storage blob upload --auth-mode login --account-name $account -c $container -f $work/big -n $prefix/c/big --overwrite --only-show-errors --output none"
         row "Upload 200 files of 4 KiB" "shackle cp -r $work/small $b/s/small --quiet" "az storage blob upload-batch --auth-mode login --account-name $account -d $container --destination-path $prefix/c/small -s $work/small --overwrite --only-show-errors --output none"
         row "Download 200 files of 4 KiB" "shackle cp -r $b/s/small $work/down-s --quiet" "az storage blob download-batch --auth-mode login --account-name $account -s $container --pattern '$prefix/c/small/*' -d $work/down-c --overwrite --only-show-errors --output none"
+        # az syncs with azcopy, which it downloads on first use.
+        sync_row "shackle sync @DIR@ $b/s/sync --delete --quiet" "az storage blob sync --auth-mode login --account-name $account -c $container -s @DIR@ -d $prefix/c/sync --delete-destination true --only-show-errors --output none"
         az storage blob delete-batch --auth-mode login --account-name "$account" -s "$container" --pattern "$prefix/*" --only-show-errors --output none
       fi ;;
     oracle)
@@ -131,6 +177,7 @@ if [ "${2:-}" = --inner ]; then
         row "Upload one 10 MiB file" "shackle cp $work/big $b/s/big --quiet" "oci os object put -ns $ns -bn $bucket --file $work/big --name $prefix/c/big --force"
         row "Upload 200 files of 4 KiB" "shackle cp -r $work/small $b/s/small --quiet" "oci os object bulk-upload -ns $ns -bn $bucket --src-dir $work/small --object-prefix $prefix/c/small/ --overwrite"
         row "Download 200 files of 4 KiB" "shackle cp -r $b/s/small $work/down-s --quiet" "oci os object bulk-download -ns $ns -bn $bucket --prefix $prefix/c/small/ --download-dir $work/down-c --overwrite"
+        sync_row "shackle sync @DIR@ $b/s/sync --delete --quiet" "oci os object sync -ns $ns -bn $bucket --src-dir @DIR@ --prefix $prefix/c/sync/ --delete"
         oci os object bulk-delete -ns "$ns" -bn "$bucket" --prefix "$prefix/" --force >/dev/null 2>&1
       fi ;;
   esac
