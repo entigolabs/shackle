@@ -81,3 +81,20 @@ func TestRegistries(t *testing.T) {
 		t.Error("a registry was made up without a region")
 	}
 }
+
+func TestAccessTokenFromEnvironment(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent")
+	t.Setenv("CLOUDSDK_AUTH_ACCESS_TOKEN", "from-gcloud")
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "from-tofu")
+	tok, err := Provider{}.Token(context.Background(), cloud.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Value != "from-tofu" || !tok.Expiry.IsZero() {
+		t.Fatalf("got %q expiring %v, want the first variable's token without an expiry", tok.Value, tok.Expiry)
+	}
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "")
+	if tok, err = (Provider{}).Token(context.Background(), cloud.Options{}); err != nil || tok.Value != "from-gcloud" {
+		t.Fatalf("got %v, %v, want gcloud's variable as the fallback", tok, err)
+	}
+}

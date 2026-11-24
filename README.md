@@ -85,7 +85,7 @@ identity the job already has, found the way each cloud's SDK finds it:
 | Cloud | Identity |
 | --- | --- |
 | AWS | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, a profile, web identity (OIDC), or the role of the container or instance |
-| Google Cloud | Application Default Credentials: the key file named by `GOOGLE_APPLICATION_CREDENTIALS`, workload identity federation, or the metadata server |
+| Google Cloud | An access token in `GOOGLE_OAUTH_ACCESS_TOKEN` (or `CLOUDSDK_AUTH_ACCESS_TOKEN`), used as it is and never cached; otherwise Application Default Credentials: the key file named by `GOOGLE_APPLICATION_CREDENTIALS`, workload identity federation, or the metadata server |
 | Azure | a service principal in `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`, workload identity, or a managed identity |
 | Oracle Cloud | the API key of the OCI configuration file (`OCI_CLI_CONFIG_FILE`, `OCI_CLI_PROFILE`), a resource principal, an instance principal with `OCI_CLI_AUTH=instance_principal`, or a session token with `OCI_CLI_AUTH=security_token` |
 

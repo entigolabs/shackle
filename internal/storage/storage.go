@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -147,6 +148,7 @@ func download(ctx context.Context, store Store, key string, o CopyOptions, exclu
 	if err != nil {
 		return err
 	}
+	files := newPool(ctx)
 	for _, obj := range objects {
 		rel := strings.TrimPrefix(obj.Key, prefix)
 		if rel == "" || strings.HasSuffix(rel, "/") {
@@ -157,19 +159,23 @@ func download(ctx context.Context, store Store, key string, o CopyOptions, exclu
 		}
 		local, err := safeJoin(o.Destination, rel)
 		if err != nil {
+			files.wait()
 			return fmt.Errorf("object %q: %w", obj.Key, err)
 		}
 		o.Log("%s -> %s", obj.Key, local)
-		if err := downloadFile(ctx, store, obj.Key, local); err != nil {
-			return err
-		}
-		// The file gets the object's time, so that a later sync can tell
-		// what changed since the download.
-		if !obj.ModTime.IsZero() {
-			_ = os.Chtimes(local, obj.ModTime, obj.ModTime)
-		}
+		files.do(func(ctx context.Context) error {
+			if err := downloadFile(ctx, store, obj.Key, local); err != nil {
+				return err
+			}
+			// The file gets the object's time, so that a later sync can tell
+			// what changed since the download.
+			if !obj.ModTime.IsZero() {
+				_ = os.Chtimes(local, obj.ModTime, obj.ModTime)
+			}
+			return nil
+		})
 	}
-	return nil
+	return files.wait()
 }
 
 func downloadFile(ctx context.Context, store Store, key, dest string) (err error) {
@@ -216,13 +222,19 @@ func upload(ctx context.Context, store Store, key string, o CopyOptions, exclude
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	return walkFiles(o.Source, func(p, rel string, _ os.FileInfo) error {
+	files := newPool(ctx)
+	err = walkFiles(o.Source, func(p, rel string, _ os.FileInfo) error {
 		if exclude.match(rel) {
 			return nil
 		}
 		o.Log("%s -> %s", p, prefix+rel)
-		return uploadFile(ctx, store, p, prefix+rel)
+		files.do(func(ctx context.Context) error { return uploadFile(ctx, store, p, prefix+rel) })
+		return nil
 	})
+	if werr := files.wait(); err == nil {
+		err = werr
+	}
+	return err
 }
 
 // walkFiles calls fn for every file under root, with its path relative to
@@ -326,6 +338,7 @@ func Sync(ctx context.Context, o SyncOptions, open func(context.Context, Locatio
 		remoteObjects[strings.TrimPrefix(obj.Key, prefix)] = obj
 	}
 	seen := map[string]bool{}
+	files := newPool(ctx)
 	err = walkFiles(o.Source, func(p, rel string, info os.FileInfo) error {
 		if exclude.match(rel) {
 			return nil
@@ -335,21 +348,76 @@ func Sync(ctx context.Context, o SyncOptions, open func(context.Context, Locatio
 			return nil
 		}
 		o.Log("%s -> %s", p, prefix+rel)
-		return uploadFile(ctx, store, p, prefix+rel)
+		files.do(func(ctx context.Context) error { return uploadFile(ctx, store, p, prefix+rel) })
+		return nil
 	})
+	if werr := files.wait(); err == nil {
+		err = werr
+	}
+	// Nothing is deleted after a failed upload: the prefix keeps what it had.
 	if err != nil || !o.Delete {
 		return err
 	}
+	files = newPool(ctx)
 	for rel, obj := range remoteObjects {
 		if rel == "" || seen[rel] || exclude.match(rel) {
 			continue
 		}
 		o.Log("delete %s", obj.Key)
-		if err := store.Delete(ctx, obj.Key); err != nil {
-			return fmt.Errorf("delete %s: %w", obj.Key, err)
-		}
+		files.do(func(ctx context.Context) error {
+			if err := store.Delete(ctx, obj.Key); err != nil {
+				return fmt.Errorf("delete %s: %w", obj.Key, err)
+			}
+			return nil
+		})
 	}
-	return nil
+	return files.wait()
+}
+
+// Parallel is how many files are transferred at once.
+const Parallel = 16
+
+// pool runs tasks, Parallel at a time. After the first failure the tasks
+// still waiting are dropped and those running are cancelled.
+type pool struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	slots  chan struct{}
+	wg     sync.WaitGroup
+	once   sync.Once
+	err    error
+}
+
+func newPool(ctx context.Context) *pool {
+	ctx, cancel := context.WithCancel(ctx)
+	return &pool{ctx: ctx, cancel: cancel, slots: make(chan struct{}, Parallel)}
+}
+
+// do runs the task when a slot is free; it waits for one.
+func (p *pool) do(task func(context.Context) error) {
+	select {
+	case p.slots <- struct{}{}:
+	case <-p.ctx.Done():
+		return
+	}
+	p.wg.Add(1)
+	go func() {
+		defer func() { <-p.slots; p.wg.Done() }()
+		if err := task(p.ctx); err != nil {
+			p.once.Do(func() { p.err = err; p.cancel() })
+		}
+	}()
+}
+
+// wait returns the first failure once every task has ended. A cancelled
+// parent context is a failure too.
+func (p *pool) wait() error {
+	p.wg.Wait()
+	defer p.cancel()
+	if p.err != nil {
+		return p.err
+	}
+	return p.ctx.Err()
 }
 
 func uploadFile(ctx context.Context, store Store, file, key string) error {

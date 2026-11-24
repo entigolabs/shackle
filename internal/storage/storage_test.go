@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,6 +48,9 @@ func TestParse(t *testing.T) {
 
 // fake is a bucket in memory.
 type fake struct {
+	mu       sync.Mutex
+	inFlight int
+	maxSeen  int
 	objects  map[string]string
 	modTimes map[string]time.Time
 	failOn   string
@@ -54,6 +59,8 @@ type fake struct {
 }
 
 func (f *fake) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.objects, key)
 	f.deletes = append(f.deletes, key)
 	return nil
@@ -71,6 +78,8 @@ func (f *fake) List(_ context.Context, prefix string) ([]Object, error) {
 }
 
 func (f *fake) Download(_ context.Context, key string, w io.Writer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	v, ok := f.objects[key]
 	if !ok {
 		return errors.New("no such key")
@@ -91,6 +100,19 @@ func (f *fake) Upload(_ context.Context, key string, r io.ReadSeeker, size int64
 	}
 	if n != size {
 		return errors.New("size does not match the content")
+	}
+	// Uploads overlap here, outside the lock, so that the test below can
+	// count how many run at once.
+	f.mu.Lock()
+	f.inFlight++
+	f.maxSeen = max(f.maxSeen, f.inFlight)
+	f.mu.Unlock()
+	time.Sleep(time.Millisecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inFlight--
+	if key == f.failOn {
+		return errors.New("connection reset")
 	}
 	f.objects[key] = b.String()
 	f.uploads = append(f.uploads, key)
@@ -375,5 +397,34 @@ func TestUploadFollowsSymlinks(t *testing.T) {
 	want := map[string]string{"c/plain": "p", "c/linked/bin": "binary"}
 	if !equal(f.objects, want) {
 		t.Errorf("bucket = %v, want %v", f.objects, want)
+	}
+}
+
+func TestUploadsRunInParallelAndStopOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	const n = 200
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := &fake{objects: map[string]string{}}
+	if err := Copy(context.Background(), CopyOptions{Source: dir, Destination: "s3://b/p", Recursive: true}, opener(f)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.objects) != n {
+		t.Fatalf("%d objects uploaded, want %d", len(f.objects), n)
+	}
+	if f.maxSeen < 2 || f.maxSeen > Parallel {
+		t.Fatalf("%d uploads at once, want between 2 and %d", f.maxSeen, Parallel)
+	}
+
+	f = &fake{objects: map[string]string{}, failOn: "p/f010"}
+	err := Copy(context.Background(), CopyOptions{Source: dir, Destination: "s3://b/p", Recursive: true}, opener(f))
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("got %v, want the upload's failure", err)
+	}
+	if len(f.objects) >= n-1 {
+		t.Fatalf("%d objects uploaded after a failure at the 11th file, want the rest dropped", len(f.objects))
 	}
 }

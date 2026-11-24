@@ -23,12 +23,24 @@ import (
 
 const scope = "https://www.googleapis.com/auth/cloud-platform"
 
-// Provider implements cloud.Provider with Application Default Credentials:
-// the key file GOOGLE_APPLICATION_CREDENTIALS names, workload identity
-// federation, or the metadata server.
+// accessTokenEnv names the variables holding an OAuth access token to use as it
+// is: the one the OpenTofu Google provider reads, and gcloud's own.
+var accessTokenEnv = []string{"GOOGLE_OAUTH_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"}
+
+// Provider implements cloud.Provider with an access token from the
+// environment (GOOGLE_OAUTH_ACCESS_TOKEN) or Application Default
+// Credentials: the key file GOOGLE_APPLICATION_CREDENTIALS names, workload
+// identity federation, or the metadata server.
 type Provider struct{}
 
 func tokenSource(ctx context.Context) (oauth2.TokenSource, error) {
+	for _, name := range accessTokenEnv {
+		if t := os.Getenv(name); t != "" {
+			// The token's lifetime is not known, so it has no expiry: it is
+			// handed on as it is and never cached.
+			return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: t}), nil
+		}
+	}
 	creds, err := googleauth.FindDefaultCredentials(ctx, scope)
 	if err != nil {
 		return nil, fmt.Errorf("no Google credentials: %w", err)
