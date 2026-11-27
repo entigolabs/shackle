@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/entigolabs/shackle/internal/aws"
@@ -52,6 +54,10 @@ type env struct {
 	stdout    io.Writer
 	stderr    io.Writer
 	version   string
+	// attempt and pause replace attemptTimeout and the pauses between
+	// attempts in tests.
+	attempt time.Duration
+	pause   func(retry int) time.Duration
 }
 
 // Main runs shackle and returns its exit code.
@@ -203,8 +209,70 @@ func (e *env) clouds() string {
 	return strings.Join(names, ", ")
 }
 
-// A cloud call that takes longer than this has hung.
-const timeout = 2 * time.Minute
+// A call to a cloud's control plane (describe a cluster, mint a token, list
+// registries) is answered in a second or two. One that has not been answered
+// in attemptTimeout has hung, and the next try usually goes through: a single
+// request without an answer must not use up the whole command. These calls
+// change nothing, so they are safe to repeat.
+const (
+	attemptTimeout = 30 * time.Second
+	retries        = 3
+)
+
+// attempts runs a control plane call, again after a hang or an error that
+// may pass, up to retries times more. An error that the next try would meet
+// again (no access, no such cluster) is returned at once.
+func attempts[T any](ctx context.Context, e *env, call func(context.Context) (T, error)) (T, error) {
+	limit := e.attempt
+	if limit == 0 {
+		limit = attemptTimeout
+	}
+	pause := e.pause
+	if pause == nil {
+		pause = func(retry int) time.Duration { return time.Second << (retry - 1) } // 1s, 2s, 4s
+	}
+	for try := 1; ; try++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, limit)
+		v, err := call(attemptCtx)
+		hung := attemptCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil
+		cancel()
+		if err == nil {
+			return v, nil
+		}
+		if hung {
+			err = fmt.Errorf("no answer in %s: %w", limit, err)
+		}
+		if !hung && !mayPass(err) {
+			return v, err
+		}
+		if try > retries {
+			return v, fmt.Errorf("%w (%d attempts)", err, try)
+		}
+		fmt.Fprintf(e.stderr, "shackle: %v; trying again (attempt %d of %d)\n", err, try+1, retries+1)
+		select {
+		case <-ctx.Done():
+			return v, ctx.Err()
+		case <-time.After(pause(try)):
+		}
+	}
+}
+
+// mayPass tells an error of the network or of a busy service from one the
+// next try would meet again.
+func mayPass(err error) bool {
+	if cloud.IsTransient(err) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return dns.IsTimeout || dns.IsTemporary
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
 func (e *env) kubeconfig(ctx context.Context, args []string) error {
 	fs := e.newFlags("kubeconfig", "kubeconfig <cloud> --cluster NAME [flags]")
@@ -227,9 +295,7 @@ func (e *env) kubeconfig(ctx context.Context, args []string) error {
 	if o.Cluster == "" {
 		return usagef("no cluster: pass --cluster")
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	c, err := p.Cluster(ctx, o)
+	c, err := attempts(ctx, e, func(ctx context.Context) (*cloud.Cluster, error) { return p.Cluster(ctx, o) })
 	if err != nil {
 		return err
 	}
@@ -313,9 +379,7 @@ func (e *env) token(ctx context.Context, args []string) error {
 	}
 	t, ok := cache.Get(key)
 	if !ok {
-		ctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		fresh, err := p.Token(ctx, o)
+		fresh, err := attempts(ctx, e, func(ctx context.Context) (*cloud.Token, error) { return p.Token(ctx, o) })
 		if err != nil {
 			return err
 		}
@@ -355,9 +419,7 @@ func (e *env) registries(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	hosts, err := p.Registries(ctx, o)
+	hosts, err := attempts(ctx, e, func(ctx context.Context) ([]string, error) { return p.Registries(ctx, o) })
 	if err != nil {
 		return err
 	}
@@ -383,9 +445,7 @@ func (e *env) registryToken(ctx context.Context, args []string) error {
 	if *output != "password" && *output != "json" {
 		return usagef("unknown --output %q (password, json)", *output)
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cred, err := p.RegistryCredential(ctx, o)
+	cred, err := attempts(ctx, e, func(ctx context.Context) (*cloud.RegistryCredential, error) { return p.RegistryCredential(ctx, o) })
 	if err != nil {
 		return err
 	}

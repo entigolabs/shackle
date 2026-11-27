@@ -109,6 +109,23 @@ func TestClusterReportsAPIErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "AuthorizationFailed") {
 		t.Errorf("err = %v, want the API's reason", err)
 	}
+	if cloud.IsTransient(err) {
+		t.Error("a refusal is not worth another try")
+	}
+}
+
+func TestClusterMarksBusyAnswersAsTransient(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "busy", status)
+		}))
+		p := Provider{ARM: srv.URL, HTTP: srv.Client(), Credential: &fakeCredential{}}
+		_, err := p.Cluster(context.Background(), cloud.Options{Cluster: "c", Subscription: "s", ResourceGroup: "g"})
+		srv.Close()
+		if !cloud.IsTransient(err) {
+			t.Errorf("status %d: err = %v, want it marked as worth another try", status, err)
+		}
+	}
 }
 
 func TestParseCredentials(t *testing.T) {

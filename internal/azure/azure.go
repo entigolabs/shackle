@@ -313,7 +313,12 @@ func do(client *http.Client, req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		err := fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		// Throttled, or the service is having a moment.
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			return nil, cloud.Transient(err)
+		}
+		return nil, err
 	}
 	return body, nil
 }
