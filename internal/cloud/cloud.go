@@ -3,8 +3,29 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// Transient marks an error as worth another try: the cloud was busy or
+// throttled the request, and the same request may well be answered a moment
+// later.
+func Transient(err error) error {
+	if err == nil {
+		return nil
+	}
+	return transient{err}
+}
+
+// IsTransient reports whether an error was marked with Transient.
+func IsTransient(err error) bool {
+	var t transient
+	return errors.As(err, &t)
+}
+
+type transient struct{ error }
+
+func (t transient) Unwrap() error { return t.error }
 
 // Options is what the command line tells a provider. A provider reads the
 // fields its cloud uses and ignores the rest.

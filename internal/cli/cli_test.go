@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,14 +27,31 @@ type fakeProvider struct {
 	hosts      []string
 	err        error
 	tokenCalls int
-	lastToken  cloud.Options
-	lastOpts   cloud.Options
+	// clusterTries is what the first calls of Cluster do before it answers
+	// from cluster and err.
+	clusterTries []error
+	clusterCalls int
+	lastToken    cloud.Options
+	lastOpts     cloud.Options
 }
 
-func (f *fakeProvider) Cluster(_ context.Context, o cloud.Options) (*cloud.Cluster, error) {
+func (f *fakeProvider) Cluster(ctx context.Context, o cloud.Options) (*cloud.Cluster, error) {
 	f.lastOpts = o
+	f.clusterCalls++
+	if f.clusterCalls <= len(f.clusterTries) {
+		switch err := f.clusterTries[f.clusterCalls-1]; {
+		case err == errHang:
+			<-ctx.Done() // a request the cloud never answers
+			return nil, fmt.Errorf("Post \"https://cloud.example\": %w", ctx.Err())
+		case err != nil:
+			return nil, err
+		}
+	}
 	return f.cluster, f.err
 }
+
+// errHang in clusterTries makes that try wait for its deadline.
+var errHang = errors.New("hang")
 
 func (f *fakeProvider) Token(_ context.Context, o cloud.Options) (*cloud.Token, error) {
 	f.tokenCalls++
@@ -288,5 +306,77 @@ func TestRegistries(t *testing.T) {
 	out.Reset()
 	if code := e.run(context.Background(), []string{"registries", "aws"}); code != 0 || out.String() != "" {
 		t.Errorf("no registries: exit %d, output %q", code, out)
+	}
+}
+
+func retryEnv(t *testing.T, p *fakeProvider) (*env, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	e, out, errOut := newEnv(t, p)
+	e.attempt = 20 * time.Millisecond
+	e.pause = func(int) time.Duration { return time.Millisecond }
+	return e, out, errOut
+}
+
+func TestControlPlaneCallIsRetriedAfterAHang(t *testing.T) {
+	p := &fakeProvider{
+		cluster:      &cloud.Cluster{Name: "c", Server: "https://c.example", CAData: []byte("ca")},
+		clusterTries: []error{errHang, cloud.Transient(errors.New("429 Too Many Requests"))},
+	}
+	e, out, errOut := retryEnv(t, p)
+	if code := e.run(context.Background(), []string{"kubeconfig", "aws", "--cluster", "c", "--stdout"}); code != 0 {
+		t.Fatalf("exit code %d: %s", code, errOut.String())
+	}
+	if p.clusterCalls != 3 {
+		t.Errorf("%d calls, want the third to answer", p.clusterCalls)
+	}
+	if !strings.Contains(out.String(), "https://c.example") {
+		t.Errorf("no kubeconfig on stdout: %s", out.String())
+	}
+	for _, want := range []string{"no answer in 20ms", "attempt 2 of 4", "429 Too Many Requests", "attempt 3 of 4"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr lacks %q: %s", want, errOut.String())
+		}
+	}
+}
+
+func TestControlPlaneCallGivesUpAfterThreeRetries(t *testing.T) {
+	p := &fakeProvider{clusterTries: []error{errHang, errHang, errHang, errHang, errHang}}
+	e, _, errOut := retryEnv(t, p)
+	if code := e.run(context.Background(), []string{"kubeconfig", "aws", "--cluster", "c", "--stdout"}); code == 0 {
+		t.Fatal("want a failure")
+	}
+	if p.clusterCalls != 4 {
+		t.Errorf("%d calls, want the first try and three more", p.clusterCalls)
+	}
+	if !strings.Contains(errOut.String(), "no answer in 20ms") || !strings.Contains(errOut.String(), "(4 attempts)") {
+		t.Errorf("the error must say what happened and how often: %s", errOut.String())
+	}
+}
+
+func TestControlPlaneErrorThatWouldRepeatIsNotRetried(t *testing.T) {
+	p := &fakeProvider{clusterTries: []error{errors.New("403 Forbidden: no access to the cluster")}}
+	e, _, errOut := retryEnv(t, p)
+	if code := e.run(context.Background(), []string{"kubeconfig", "aws", "--cluster", "c", "--stdout"}); code == 0 {
+		t.Fatal("want a failure")
+	}
+	if p.clusterCalls != 1 {
+		t.Errorf("%d calls, want one: the next try would meet the same answer", p.clusterCalls)
+	}
+	if strings.Contains(errOut.String(), "trying again") || strings.Contains(errOut.String(), "attempts)") {
+		t.Errorf("no retry may be reported: %s", errOut.String())
+	}
+}
+
+func TestCancelledCommandIsNotRetried(t *testing.T) {
+	p := &fakeProvider{clusterTries: []error{errHang, errHang}}
+	e, _, _ := retryEnv(t, p)
+	e.attempt = time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if code := e.run(ctx, []string{"kubeconfig", "aws", "--cluster", "c", "--stdout"}); code == 0 {
+		t.Fatal("want a failure")
+	}
+	if p.clusterCalls != 1 {
+		t.Errorf("%d calls, want one: the command itself was cancelled", p.clusterCalls)
 	}
 }

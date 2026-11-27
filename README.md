@@ -363,6 +363,19 @@ BENCH_CLUSTER=my-cluster BENCH_REGION=eu-north-1 \
 BENCH_BUCKET=s3://my-bucket/shackle-bench scripts/bench.sh aws
 ```
 
+## When a cloud does not answer
+
+`kubeconfig`, `token`, `registry-token` and `registries` ask a cloud's control
+plane, which normally answers in a second or two. A call without an answer
+after 30 seconds is given up and made again, up to three more times, with a
+short pause in between; so is one the cloud throttled or answered with a
+server error, and one that failed on the network. Each retry is reported on
+standard error. An answer that a retry would only meet again, such as no
+access or no such cluster, fails at once.
+
+`cp` and `sync` are not cut short this way: a large file takes as long as it
+takes.
+
 ## Limits
 
 - Azure: the public cloud only, not the sovereign clouds.
